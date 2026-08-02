@@ -192,12 +192,13 @@ test("imports, inspects, restarts, and reopens an immutable source outline", asy
     await page.getByRole("button", { name: "Create project" }).click();
     await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
 
+    const markdownText = "# Chapter One\nOpening \u2014 \u65e5\u672c\u8a9e \u{1F642}\n## Arrival\nA ship arrives.";
     await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles({
       name: "browser-story.md",
       mimeType: "text/markdown",
-      buffer: Buffer.from("# Chapter One\nOpening\n## Arrival\nA ship arrives.", "utf8")
+      buffer: Buffer.from(markdownText, "utf8")
     });
-    await expect(page.getByLabel("Paste source text")).toHaveValue("# Chapter One\nOpening\n## Arrival\nA ship arrives.");
+    await expect(page.getByLabel("Paste source text")).toHaveValue(markdownText);
     await page.getByRole("button", { name: "Import source" }).click();
     await expect(page.getByRole("heading", { name: "browser-story.md" })).toBeVisible();
     await expect(page.getByTestId("normalized-source")).toContainText("A ship arrives.");
@@ -210,6 +211,80 @@ test("imports, inspects, restarts, and reopens an immutable source outline", asy
     await expect(page.getByRole("heading", { name: "Browser source story" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "browser-story.md" })).toBeVisible();
     await expect(page.getByTestId("selected-source-segment")).toContainText("A ship arrives.");
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid source files without creating source rows", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-invalid-source-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  let server: RunningServer | undefined;
+  let projectId = "";
+  let sourcePostCount = 0;
+  try {
+    server = await startServer(databasePath);
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "POST" && /\/api\/projects\/[^/]+\/sources$/.test(pathname)) {
+        sourcePostCount += 1;
+      }
+    });
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Invalid source story");
+    const projectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    projectId = (await (await projectResponsePromise).json()).id as string;
+    await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
+
+    const invalidFiles = [
+      {
+        name: "story.pdf",
+        mimeType: "application/pdf",
+        buffer: Buffer.from("not a supported source", "utf8"),
+        message: /unsupported source file.*\.txt.*\.md.*\.markdown/i
+      },
+      {
+        name: "story.md",
+        mimeType: "text/plain",
+        buffer: Buffer.from("Markdown with an incompatible MIME", "utf8"),
+        message: /incompatible MIME/i
+      },
+      {
+        name: "story.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from([0xc3, 0x28]),
+        message: /invalid UTF-8.*save.*UTF-8/i
+      }
+    ];
+
+    for (const invalidFile of invalidFiles) {
+      await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles(invalidFile);
+      await expect(page.getByRole("alert")).toContainText(invalidFile.message);
+      await expect(page.getByLabel("Paste source text")).toHaveValue("");
+      await page.getByRole("button", { name: "Import source" }).click();
+      await expect(page.getByText("No source imported yet.", { exact: true })).toBeVisible();
+      const sources = await page.request.get(`${server.baseUrl}/api/projects/${projectId}/sources`);
+      expect(sources.ok()).toBeTruthy();
+      expect(await sources.json()).toEqual([]);
+    }
+
+    expect(sourcePostCount).toBe(0);
+
+    const validUnicodeText = "Caf\u00e9 \u2014 \u65e5\u672c\u8a9e \u{1F642}";
+    await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles({
+      name: "valid.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(validUnicodeText, "utf8")
+    });
+    await expect(page.getByLabel("Paste source text")).toHaveValue(validUnicodeText);
+    await page.getByRole("button", { name: "Import source" }).click();
+    await expect(page.getByTestId("normalized-source")).toContainText(validUnicodeText);
+    expect(sourcePostCount).toBe(1);
   } finally {
     if (server) await stopServer(server.child);
     rmSync(directory, { recursive: true, force: true });

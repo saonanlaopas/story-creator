@@ -106,9 +106,13 @@ interface SourceBoundary {
 }
 
 function plainTextChapterHeading(trimmedLine: string): string | null {
-  // Version 1 recognizes "Chapter 1", "Chapter I", and "Chapter One",
-  // optionally followed by a title separated by whitespace, ':', '-', or '.'.
-  const match = /^chapter\s+(?:\d+|[ivxlcdm]+|[a-z]+)(?:(?:\s+|\s*[:.-]\s*).*)?$/i.exec(trimmedLine);
+  // Version 1 recognizes Arabic numerals, canonical Roman numerals, and the
+  // conservative number-word set one through ten. A title must follow a
+  // visible separator (':', '-', or '.'); sentence-like text is not a title.
+  const numberWord = "(?:one|two|three|four|five|six|seven|eight|nine|ten)";
+  const romanNumeral = "(?=[MDCLXVI])(?:M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))";
+  const number = `(?:\\d+|${romanNumeral}|${numberWord})`;
+  const match = new RegExp(`^chapter\\s+${number}(?:\\s*[:.-]\\s*\\S.*)?$`, "i").exec(trimmedLine);
   return match ? trimmedLine : null;
 }
 

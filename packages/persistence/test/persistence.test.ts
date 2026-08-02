@@ -243,6 +243,75 @@ describe("immutable source documents", () => {
     }
   });
 
+  it("enforces source and segmentation ownership with composite foreign keys", () => {
+    const database = openDatabase();
+    try {
+      const projects = new ProjectRepository(database);
+      const project = projects.create({ name: "Constraint project", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000026"
+      });
+      const otherProject = projects.create({ name: "Other constraint project", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000027"
+      });
+      const repository = new SourceRepository(database);
+      const sourceA = repository.create(project.id, {
+        filename: "source-a.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Source A"
+      }, { id: "00000000-0000-4000-8000-000000000028", segmentationVersionId: "00000000-0000-4000-8000-000000000029" });
+      const sourceB = repository.create(otherProject.id, {
+        filename: "source-b.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Source B"
+      }, { id: "00000000-0000-4000-8000-000000000030", segmentationVersionId: "00000000-0000-4000-8000-000000000031" });
+      expect(repository.get(project.id, sourceA.document.id)?.segments).toHaveLength(1);
+
+      const segmentInsert = database.prepare(
+        `INSERT INTO source_segments
+          (id, source_document_id, segmentation_version_id, parent_id, kind, position, heading, start_offset, end_offset, content, fingerprint)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      expect(() => segmentInsert.run(
+        "cross-source-segmentation",
+        sourceA.document.id,
+        sourceB.segmentation.id,
+        null,
+        "unknown",
+        10,
+        null,
+        0,
+        8,
+        "Source A",
+        "a".repeat(64)
+      )).toThrow(/foreign key/i);
+
+      const secondSegmentationId = "00000000-0000-4000-8000-000000000032";
+      database.prepare(
+        `INSERT INTO source_segmentations (id, source_document_id, algorithm_version, created_at)
+         VALUES (?, ?, ?, ?)`
+      ).run(secondSegmentationId, sourceA.document.id, "synthetic-segmentation-v2", "2025-01-01T00:00:00.000Z");
+      const parent = sourceA.segments[0];
+      if (!parent) throw new Error("Expected source A to have a segment");
+      expect(() => segmentInsert.run(
+        "cross-segmentation-parent",
+        sourceA.document.id,
+        secondSegmentationId,
+        parent.id,
+        "unknown",
+        0,
+        null,
+        0,
+        8,
+        "Source A",
+        "b".repeat(64)
+      )).toThrow(/foreign key/i);
+    } finally {
+      database.close();
+    }
+  });
+
   it("rolls back every source row when segment creation fails", () => {
     const database = openDatabase();
     try {

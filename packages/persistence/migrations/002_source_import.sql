@@ -18,7 +18,8 @@ CREATE TABLE source_segmentations (
   source_document_id TEXT NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
   algorithm_version TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  UNIQUE (source_document_id, algorithm_version)
+  UNIQUE (source_document_id, algorithm_version),
+  UNIQUE (id, source_document_id)
 );
 
 CREATE TABLE source_segments (
@@ -34,8 +35,14 @@ CREATE TABLE source_segments (
   content TEXT NOT NULL,
   fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),
   PRIMARY KEY (source_document_id, id),
-  FOREIGN KEY (source_document_id, parent_id) REFERENCES source_segments(source_document_id, id) ON DELETE CASCADE,
-  UNIQUE (segmentation_version_id, position)
+  FOREIGN KEY (segmentation_version_id, source_document_id)
+    REFERENCES source_segmentations(id, source_document_id) ON DELETE CASCADE,
+  FOREIGN KEY (source_document_id, parent_id)
+    REFERENCES source_segments(source_document_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (segmentation_version_id, parent_id)
+    REFERENCES source_segments(segmentation_version_id, id) ON DELETE CASCADE,
+  UNIQUE (segmentation_version_id, position),
+  UNIQUE (segmentation_version_id, id)
 );
 
 CREATE INDEX source_segments_document_idx ON source_segments (source_document_id, position ASC);

@@ -4,6 +4,7 @@ import type { CreateProjectInput, ProjectEntryMode, ProjectRecord, SourceInspect
 import { request, selectedProjectStorageKey, selectedSourceSegmentStorageKey } from "./api.js";
 import { projectModeLabel, projectModes } from "./project-modes.js";
 import { SourcePanel } from "./source-panel.js";
+import { readSourceFile } from "./source-file.js";
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -20,6 +21,7 @@ export default function App() {
   const [sourceLoading, setSourceLoading] = useState(false);
   const [sourceSaving, setSourceSaving] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceFileBlocked, setSourceFileBlocked] = useState(false);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
 
   const selectedId = selectedProject?.id;
@@ -110,21 +112,38 @@ export default function App() {
   };
 
   const handleSourceFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+    const input = event.currentTarget;
+    const file = input.files?.[0];
     if (!file) return;
+    setSourceFileBlocked(true);
     try {
-      setSourceText(await file.text());
-      setSourceFilename(file.name);
-      setSourceMediaType(file.type === "text/markdown" || /\.(?:md|markdown)$/i.test(file.name) ? "text/markdown" : "text/plain");
+      const decoded = await readSourceFile(file);
+      setSourceText(decoded.text);
+      setSourceFilename(decoded.filename);
+      setSourceMediaType(decoded.mediaType);
+      setSourceFileBlocked(false);
       setSourceError(null);
     } catch (fileError) {
+      setSourceText("");
+      setSourceFilename("pasted.txt");
+      setSourceMediaType("text/plain");
+      setSourceFileBlocked(true);
+      input.value = "";
       setSourceError(fileError instanceof Error ? fileError.message : "Could not read source file");
+    }
+  };
+
+  const handleSourceTextChange = (text: string) => {
+    setSourceText(text);
+    if (sourceFileBlocked) {
+      setSourceFileBlocked(false);
+      setSourceError(null);
     }
   };
 
   const importSource = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!selectedId) return;
+    if (!selectedId || sourceFileBlocked) return;
     setSourceSaving(true);
     setSourceError(null);
     try {
@@ -259,7 +278,7 @@ export default function App() {
         sourceSaving={sourceSaving}
         selectedSegmentId={selectedSegmentId}
         onFileChange={(event) => void handleSourceFileChange(event)}
-        onTextChange={setSourceText}
+        onTextChange={handleSourceTextChange}
         onImport={(event) => void importSource(event)}
         onSelectSegment={selectSourceSegment}
       />
