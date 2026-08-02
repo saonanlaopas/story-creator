@@ -426,6 +426,11 @@ test("recovers a stale draft conflict without losing local prose", async ({ page
     await expect(page.getByTestId("manuscript-save-state")).toHaveText("Save failed");
     await expect(manuscriptPanel.getByRole("button", { name: "Save local version" })).toBeVisible();
 
+    const latestLocalText = `${localText} updated while the conflict is unresolved`;
+    await editor.fill(latestLocalText);
+    await expect(editor).toHaveValue(latestLocalText);
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByText("Checkpoint could not be created because the draft save failed. Retry the save first.", { exact: true })).toBeVisible();
     await page.waitForTimeout(500);
     expect(uiExpectedRevisions).toEqual([1]);
     await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
@@ -435,15 +440,147 @@ test("recovers a stale draft conflict without losing local prose", async ({ page
 
     const resolved = await page.request.get(`${server.baseUrl}/api/projects/${projectId}/manuscript`);
     expect(resolved.ok()).toBeTruthy();
-    expect((await resolved.json()).units[0].draft).toMatchObject({ prose: localText, revision: 3 });
+    expect((await resolved.json()).units[0].draft).toMatchObject({ prose: latestLocalText, revision: 3 });
 
     await page.goto("about:blank");
     await stopServer(server.child);
     server = await startServer(databasePath, port);
     await page.goto(server.baseUrl);
     await expect(page.getByRole("heading", { name: "Browser conflict story" })).toBeVisible();
-    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(latestLocalText);
     await expect(manuscriptPanel.locator(".editor-heading p.muted")).toContainText("draft revision 3");
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("blocks project navigation while a draft conflict is unresolved", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-conflict-navigation-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  const uiExpectedRevisions: number[] = [];
+  try {
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Conflict navigation first");
+    const firstProjectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    const firstProjectId = (await (await firstProjectResponsePromise).json()).id as string;
+    await page.getByLabel("Paste source text").fill("# Conflict navigation chapter\nOriginal prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+
+    await page.getByLabel("Project name").fill("Conflict navigation second");
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation second" })).toBeVisible();
+    const savedProjects = page.locator("section[aria-labelledby='saved-heading']");
+    const firstProject = savedProjects.locator("li").filter({ hasText: "Conflict navigation first" });
+    await firstProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation first" })).toBeVisible();
+    await expect(manuscriptPanel.getByTestId("manuscript-editor")).toBeVisible();
+
+    const loaded = await page.request.get(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript`);
+    expect(loaded.ok()).toBeTruthy();
+    const unitId = ((await loaded.json()).units[0].unit.id) as string;
+    const otherSave = await page.request.put(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript/units/${unitId}/draft`, {
+      data: { prose: "Other client revision", expectedRevision: 1 }
+    });
+    expect(otherSave.ok()).toBeTruthy();
+    expect((await otherSave.json()).draft.revision).toBe(2);
+
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() !== "PUT" || !/\/manuscript\/units\/[^/]+\/draft$/.test(pathname)) return;
+      const body = request.postDataJSON() as { expectedRevision?: number };
+      if (typeof body.expectedRevision === "number") uiExpectedRevisions.push(body.expectedRevision);
+    });
+
+    const localText = "Local prose must remain visible during conflict navigation";
+    const editor = page.getByTestId("manuscript-editor");
+    await editor.fill(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toContainText("revision 2", { timeout: 5_000 });
+    await expect(editor).toHaveValue(localText);
+
+    const secondProject = savedProjects.locator("li").filter({ hasText: "Conflict navigation second" });
+    await secondProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation first" })).toBeVisible();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toBeVisible();
+    expect(uiExpectedRevisions).toEqual([1]);
+
+    await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    expect(uiExpectedRevisions).toEqual([1, 2]);
+    await secondProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation second" })).toBeVisible();
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not create a project until a draft conflict is resolved", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-project-guard-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  let projectPostCount = 0;
+  try {
+    server = await startServer(databasePath, port);
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/projects") projectPostCount += 1;
+    });
+
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Project guard first");
+    const firstProjectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    const firstProjectId = (await (await firstProjectResponsePromise).json()).id as string;
+    await page.getByLabel("Paste source text").fill("# Project guard chapter\nOriginal prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+
+    const loaded = await page.request.get(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript`);
+    expect(loaded.ok()).toBeTruthy();
+    const unitId = ((await loaded.json()).units[0].unit.id) as string;
+    const otherSave = await page.request.put(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript/units/${unitId}/draft`, {
+      data: { prose: "Other client revision", expectedRevision: 1 }
+    });
+    expect(otherSave.ok()).toBeTruthy();
+    expect((await otherSave.json()).draft.revision).toBe(2);
+
+    const localText = "Local prose must survive the blocked project creation";
+    await page.getByTestId("manuscript-editor").fill(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toContainText("revision 2", { timeout: 5_000 });
+    const newProjectName = "Project guard second";
+    await page.getByLabel("Project name").fill(newProjectName);
+    await page.getByLabel("Import and continue").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+
+    await expect(page.getByRole("heading", { name: "Project guard first" })).toBeVisible();
+    await expect(page.getByLabel("Project name")).toHaveValue(newProjectName);
+    await expect(page.getByLabel("Import and continue")).toBeChecked();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toBeVisible();
+    await expect(manuscriptPanel.getByRole("button", { name: "Save local version" })).toBeVisible();
+    expect(projectPostCount).toBe(1);
+
+    await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await expect(page.getByTestId("manuscript-conflict")).not.toBeVisible();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: newProjectName })).toBeVisible();
+    expect(projectPostCount).toBe(2);
   } finally {
     if (server) await stopServer(server.child);
     rmSync(directory, { recursive: true, force: true });

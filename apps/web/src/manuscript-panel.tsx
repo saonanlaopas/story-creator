@@ -49,6 +49,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
   const [checkpointMessage, setCheckpointMessage] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [draftConflict, setDraftConflict] = useState<DraftConflict | null>(null);
+  const draftConflictRef = useRef<DraftConflict | null>(null);
   const manuscriptRef = useRef<ManuscriptView | null>(null);
   const selectedUnitIdRef = useRef<string | null>(null);
   const draftTextRef = useRef("");
@@ -57,6 +58,11 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
   const savePromiseRef = useRef<Promise<boolean> | null>(null);
   const saveImplementationRef = useRef<() => Promise<boolean>>(async () => true);
   const flushRef = useRef<() => Promise<boolean>>(async () => true);
+
+  const updateDraftConflict = (next: DraftConflict | null) => {
+    draftConflictRef.current = next;
+    setDraftConflict(next);
+  };
 
   const updateManuscript = (next: ManuscriptView | null) => {
     manuscriptRef.current = next;
@@ -88,7 +94,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
       setLoading(false);
       setError(null);
       setCheckpointMessage(null);
-      setDraftConflict(null);
+      updateDraftConflict(null);
       return;
     }
 
@@ -110,7 +116,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
         const nextUnitId = firstUnit?.unit.id ?? null;
         updateSelectedUnit(nextUnitId, loaded);
         setSaveState("saved");
-        setDraftConflict(null);
+        updateDraftConflict(null);
       })
       .catch((loadError) => {
         if (!active) return;
@@ -163,7 +169,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
       });
       updateManuscript(result.manuscript);
       setError(null);
-      setDraftConflict(null);
+      updateDraftConflict(null);
       if (pendingSaveRef.current) {
         setSaveState("saving");
         scheduleSave(0);
@@ -179,10 +185,10 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
       const currentDraft = conflictDraftFromError(saveError);
       if (currentDraft?.manuscriptUnitId === pending.unitId) {
         updatePersistedDraft(pending.unitId, currentDraft);
-        setDraftConflict({ unitId: pending.unitId, currentDraft });
+        updateDraftConflict({ unitId: pending.unitId, currentDraft });
         setError(null);
       } else {
-        setDraftConflict(null);
+        updateDraftConflict(null);
         setError(saveError instanceof Error ? saveError.message : "Could not save the manuscript draft");
       }
       setSaveState("failed");
@@ -208,6 +214,13 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
   };
 
   const flushPendingSave = async (): Promise<boolean> => {
+    if (draftConflictRef.current) {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      return false;
+    }
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -220,6 +233,15 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
       if (!(await startSave())) return false;
     }
     return true;
+  };
+
+  const saveLocalVersion = async (): Promise<boolean> => {
+    if (!draftConflictRef.current || !pendingSaveRef.current) return false;
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    return startSave();
   };
 
   flushRef.current = flushPendingSave;
@@ -248,9 +270,13 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
     draftTextRef.current = text;
     setDraftText(text);
     pendingSaveRef.current = { unitId, prose: text };
-    setSaveState("saving");
     setCheckpointMessage(null);
     setCheckpointError(null);
+    if (draftConflictRef.current) {
+      setSaveState("failed");
+      return;
+    }
+    setSaveState("saving");
     scheduleSave();
   };
 
@@ -265,7 +291,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
     draftTextRef.current = prose;
     setDraftText(prose);
     setSaveState("saved");
-    setDraftConflict(null);
+    updateDraftConflict(null);
     setCheckpointMessage(null);
     setCheckpointError(null);
   };
@@ -281,7 +307,7 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
       updateSelectedUnit(firstUnitId, created);
       if (firstUnitId) window.localStorage.setItem(selectedManuscriptUnitStorageKey(projectId), firstUnitId);
       setSaveState("saved");
-      setDraftConflict(null);
+      updateDraftConflict(null);
     } catch (initializeError) {
       setError(initializeError instanceof Error ? initializeError.message : "Could not create the working manuscript");
     } finally {
@@ -291,20 +317,21 @@ export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: 
 
   const handleRetry = () => {
     setError(null);
-    void flushPendingSave();
+    void (draftConflictRef.current ? saveLocalVersion() : flushPendingSave());
   };
 
   const handleLoadPersistedDraft = () => {
-    if (!draftConflict) return;
+    const conflict = draftConflictRef.current;
+    if (!conflict) return;
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
     }
     pendingSaveRef.current = null;
-    draftTextRef.current = draftConflict.currentDraft.prose;
-    setDraftText(draftConflict.currentDraft.prose);
-    updatePersistedDraft(draftConflict.unitId, draftConflict.currentDraft);
-    setDraftConflict(null);
+    draftTextRef.current = conflict.currentDraft.prose;
+    setDraftText(conflict.currentDraft.prose);
+    updatePersistedDraft(conflict.unitId, conflict.currentDraft);
+    updateDraftConflict(null);
     setError(null);
     setSaveState("saved");
   };

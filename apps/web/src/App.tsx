@@ -95,14 +95,18 @@ export default function App() {
     };
   }, []);
 
-  const selectProject = async (project: ProjectRecord): Promise<boolean> => {
-    if (project.id === selectedId) return true;
+  const flushCurrentManuscript = async (): Promise<boolean> => {
     try {
-      if (!(await manuscriptFlushRef.current())) return false;
+      return await manuscriptFlushRef.current();
     } catch (navigationError) {
       setError(navigationError instanceof Error ? navigationError.message : "Could not save the current manuscript before navigation");
       return false;
     }
+  };
+
+  const selectProject = async (project: ProjectRecord): Promise<boolean> => {
+    if (project.id === selectedId) return true;
+    if (!(await flushCurrentManuscript())) return false;
     setSelectedProject(project);
     window.localStorage.setItem(selectedProjectStorageKey, project.id);
     return true;
@@ -113,14 +117,16 @@ export default function App() {
     setSaving(true);
     setError(null);
     try {
+      if (!(await flushCurrentManuscript())) return;
       const input: CreateProjectInput = { name, entryMode };
       const created = await request<ProjectRecord>("/api/projects", {
         method: "POST",
         body: JSON.stringify(input)
       });
-      setName("");
       setProjects((current) => [created, ...current]);
-      await selectProject(created);
+      setSelectedProject(created);
+      window.localStorage.setItem(selectedProjectStorageKey, created.id);
+      setName("");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not create project");
     } finally {
