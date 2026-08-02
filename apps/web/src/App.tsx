@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import type { CreateProjectInput, ProjectEntryMode, ProjectRecord } from "@story-creator/domain";
-import { request, selectedProjectStorageKey } from "./api.js";
+import type { ChangeEvent, FormEvent } from "react";
+import type { CreateProjectInput, ProjectEntryMode, ProjectRecord, SourceInspection, SourceMediaType } from "@story-creator/domain";
+import { request, selectedProjectStorageKey, selectedSourceSegmentStorageKey } from "./api.js";
 import { projectModeLabel, projectModes } from "./project-modes.js";
+import { SourcePanel } from "./source-panel.js";
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -12,9 +13,18 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sources, setSources] = useState<SourceInspection[]>([]);
+  const [sourceText, setSourceText] = useState("");
+  const [sourceFilename, setSourceFilename] = useState("pasted.txt");
+  const [sourceMediaType, setSourceMediaType] = useState<SourceMediaType>("text/plain");
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceSaving, setSourceSaving] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
 
   const selectedId = selectedProject?.id;
   const selectedSummary = useMemo(() => selectedProject && projectModeLabel(selectedProject.entryMode), [selectedProject]);
+  const selectedSource = sources[0] ?? null;
 
   const loadProjects = async () => {
     setLoading(true);
@@ -42,6 +52,38 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!selectedId) {
+      setSources([]);
+      setSelectedSegmentId(null);
+      return;
+    }
+
+    let active = true;
+    setSourceLoading(true);
+    setSourceError(null);
+    void request<SourceInspection[]>(`/api/projects/${selectedId}/sources`)
+      .then((loaded) => {
+        if (!active) return;
+        setSources(loaded);
+        const source = loaded[0];
+        const storedSegmentId = window.localStorage.getItem(selectedSourceSegmentStorageKey(selectedId));
+        const storedSegment = source?.segments.find((segment) => segment.id === storedSegmentId);
+        setSelectedSegmentId(storedSegment?.id ?? source?.segments[0]?.id ?? null);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setSourceError(loadError instanceof Error ? loadError.message : "Could not load source documents");
+      })
+      .finally(() => {
+        if (active) setSourceLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedId]);
+
   const selectProject = (project: ProjectRecord) => {
     setSelectedProject(project);
     window.localStorage.setItem(selectedProjectStorageKey, project.id);
@@ -64,6 +106,58 @@ export default function App() {
       setError(saveError instanceof Error ? saveError.message : "Could not create project");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSourceFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setSourceText(await file.text());
+      setSourceFilename(file.name);
+      setSourceMediaType(file.type === "text/markdown" || /\.(?:md|markdown)$/i.test(file.name) ? "text/markdown" : "text/plain");
+      setSourceError(null);
+    } catch (fileError) {
+      setSourceError(fileError instanceof Error ? fileError.message : "Could not read source file");
+    }
+  };
+
+  const importSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedId) return;
+    setSourceSaving(true);
+    setSourceError(null);
+    try {
+      const created = await request<SourceInspection>(`/api/projects/${selectedId}/sources`, {
+        method: "POST",
+        body: JSON.stringify({
+          filename: sourceFilename.trim() || "pasted.txt",
+          mediaType: sourceMediaType,
+          encoding: "utf-8",
+          text: sourceText
+        })
+      });
+      setSources((current) => [created, ...current.filter((source) => source.document.id !== created.document.id)]);
+      const firstSegmentId = created.segments[0]?.id ?? null;
+      setSelectedSegmentId(firstSegmentId);
+      if (firstSegmentId) {
+        window.localStorage.setItem(selectedSourceSegmentStorageKey(selectedId), firstSegmentId);
+      }
+      setSourceText("");
+      setSourceFilename("pasted.txt");
+      setSourceMediaType("text/plain");
+      event.currentTarget.reset();
+    } catch (saveError) {
+      setSourceError(saveError instanceof Error ? saveError.message : "Could not import source");
+    } finally {
+      setSourceSaving(false);
+    }
+  };
+
+  const selectSourceSegment = (segmentId: string) => {
+    setSelectedSegmentId(segmentId);
+    if (selectedId) {
+      window.localStorage.setItem(selectedSourceSegmentStorageKey(selectedId), segmentId);
     }
   };
 
@@ -154,6 +248,21 @@ export default function App() {
           </div>
         ) : <p className="muted">Choose Open on a saved project to view it here.</p>}
       </section>
+
+      <SourcePanel
+        project={selectedProject}
+        source={selectedSource}
+        sourceText={sourceText}
+        filename={sourceFilename}
+        sourceError={sourceError}
+        sourceLoading={sourceLoading}
+        sourceSaving={sourceSaving}
+        selectedSegmentId={selectedSegmentId}
+        onFileChange={(event) => void handleSourceFileChange(event)}
+        onTextChange={setSourceText}
+        onImport={(event) => void importSource(event)}
+        onSelectSegment={selectSourceSegment}
+      />
     </main>
   );
 }

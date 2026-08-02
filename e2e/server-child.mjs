@@ -2,7 +2,9 @@ import { buildApp } from "../apps/server/dist/index.js";
 import process from "node:process";
 
 const app = await buildApp();
-await app.listen({ host: "127.0.0.1", port: 0 });
+const configuredPort = Number(process.env.STORY_CREATOR_E2E_PORT ?? "0");
+const port = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort < 65_536 ? configuredPort : 0;
+await app.listen({ host: "127.0.0.1", port });
 const address = app.server.address();
 if (!address || typeof address === "string") {
   await app.close();

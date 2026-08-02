@@ -1,5 +1,9 @@
 export const selectedProjectStorageKey = "story-creator:selected-project";
 
+export function selectedSourceSegmentStorageKey(projectId: string): string {
+  return `story-creator:selected-source-segment:${projectId}`;
+}
+
 export async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { headers: { "content-type": "application/json", ...(init?.headers ?? {}) }, ...init });
   if (!response.ok) {

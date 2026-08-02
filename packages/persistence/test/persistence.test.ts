@@ -1,12 +1,12 @@
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import type * as Sqlite from "node:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { openDatabase, ProjectRepository, readMigrations, transaction } from "../src/index.js";
+import { openDatabase, ProjectRepository, readMigrations, SourceRepository, transaction } from "../src/index.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof Sqlite;
@@ -102,6 +102,171 @@ describe("SQLite persistence", () => {
   });
 });
 
+describe("immutable source documents", () => {
+  it("normalizes Unicode text and creates deterministic chapter and scene segments", () => {
+    const database = openDatabase();
+    try {
+      const projects = new ProjectRepository(database);
+      const firstProject = projects.create({ name: "Source one", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000020",
+        now: new Date("2025-01-01T00:00:00.000Z")
+      });
+      const secondProject = projects.create({ name: "Source two", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000021",
+        now: new Date("2025-01-01T00:00:00.000Z")
+      });
+      const repository = new SourceRepository(database);
+      const input = {
+        filename: "story.txt",
+        mediaType: "text/plain" as const,
+        encoding: "utf-8" as const,
+        text: "\uFEFFChapter 1: Arrival\r\n🙂 “Olá”\r---\r\nChapter II\r日本語"
+      };
+      const first = repository.create(firstProject.id, input, { now: new Date("2025-01-02T00:00:00.000Z") });
+      const second = repository.create(secondProject.id, input, { now: new Date("2025-01-02T00:00:00.000Z") });
+
+      expect(first.document.normalizedText).toBe("Chapter 1: Arrival\n🙂 “Olá”\n---\nChapter II\n日本語");
+      expect(first.document.filename).toBe("story.txt");
+      expect(first.document.mediaType).toBe("text/plain");
+      expect(first.document.encoding).toBe("utf-8");
+      expect(first.document.contentHash).toHaveLength(64);
+      expect(first.document.normalizedTextHash).toHaveLength(64);
+      expect(first.segmentation.algorithmVersion).toBe("source-segmentation-v1");
+      expect(first.segments.map((segment) => ({
+        id: segment.id,
+        parentId: segment.parentId,
+        kind: segment.kind,
+        position: segment.position,
+        heading: segment.heading,
+        startOffset: segment.startOffset,
+        endOffset: segment.endOffset,
+        text: segment.text,
+        fingerprint: segment.fingerprint
+      }))).toEqual(second.segments.map((segment) => ({
+        id: segment.id,
+        parentId: segment.parentId,
+        kind: segment.kind,
+        position: segment.position,
+        heading: segment.heading,
+        startOffset: segment.startOffset,
+        endOffset: segment.endOffset,
+        text: segment.text,
+        fingerprint: segment.fingerprint
+      })));
+      expect(first.segments.map((segment) => ({ kind: segment.kind, heading: segment.heading }))).toEqual([
+        { kind: "chapter", heading: "Chapter 1: Arrival" },
+        { kind: "scene", heading: null },
+        { kind: "chapter", heading: "Chapter II" }
+      ]);
+      expect(first.segments[1]?.parentId).toBe(first.segments[0]?.id);
+      expect(first.segments[1]?.startOffset).toBe(first.document.normalizedText.indexOf("---"));
+      expect(first.segments[1]?.startOffset).toBe("Chapter 1: Arrival\n🙂 “Olá”\n".length);
+      expect(first.segments[2]?.startOffset).toBe(first.document.normalizedText.indexOf("Chapter II"));
+    } finally {
+      database.close();
+    }
+  });
+
+  it("recognizes Markdown headings, warns on ambiguous headings, and falls back to one segment", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Markdown source", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000022"
+      });
+      const repository = new SourceRepository(database);
+      const markdown = repository.create(project.id, {
+        filename: "story.md",
+        mediaType: "text/markdown",
+        encoding: "utf-8",
+        text: "# Part One\nopening\n## Arrival\nscene\n### Unsupported\nprose\n---\nend"
+      });
+      expect(markdown.segments.map((segment) => ({ kind: segment.kind, heading: segment.heading }))).toEqual([
+        { kind: "chapter", heading: "Part One" },
+        { kind: "scene", heading: "Arrival" },
+        { kind: "scene", heading: null }
+      ]);
+      expect(markdown.document.warnings).toEqual([
+        "Ambiguous heading-like line at UTF-16 offset 36; preserved as prose."
+      ]);
+
+      const plain = repository.create(project.id, {
+        filename: "plain.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "🙂 “No headings” 日本語"
+      });
+      expect(plain.segments).toHaveLength(1);
+      expect(plain.segments[0]).toMatchObject({ kind: "unknown", startOffset: 0, endOffset: plain.document.normalizedText.length });
+
+      const empty = repository.create(project.id, {
+        filename: "empty.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: ""
+      });
+      expect(empty.segments).toEqual([expect.objectContaining({ kind: "unknown", startOffset: 0, endOffset: 0, text: "" })]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects source updates and enforces project ownership with cascade cleanup", () => {
+    const database = openDatabase();
+    try {
+      const projects = new ProjectRepository(database);
+      const owner = projects.create({ name: "Owner", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000023"
+      });
+      const other = projects.create({ name: "Other", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000024"
+      });
+      const repository = new SourceRepository(database);
+      const source = repository.create(owner.id, {
+        filename: "immutable.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Original"
+      });
+
+      expect(repository.get(other.id, source.document.id)).toBeUndefined();
+      expect(() => database.prepare("UPDATE source_documents SET normalized_text = ? WHERE id = ?").run("Changed", source.document.id)).toThrow(/immutable/i);
+      expect(repository.get(owner.id, source.document.id)?.document.normalizedText).toBe("Original");
+
+      database.prepare("DELETE FROM projects WHERE id = ?").run(owner.id);
+      expect(repository.get(owner.id, source.document.id)).toBeUndefined();
+      expect(database.prepare("SELECT count(*) AS count FROM source_documents").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM source_segmentations").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM source_segments").get()).toEqual({ count: 0 });
+      expect(projects.get(other.id)?.name).toBe("Other");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rolls back every source row when segment creation fails", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Atomic source", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000025"
+      });
+      const repository = new SourceRepository(database);
+      database.exec("CREATE TRIGGER fail_source_segment_insert BEFORE INSERT ON source_segments BEGIN SELECT RAISE(ABORT, 'simulated source failure'); END");
+
+      expect(() => repository.create(project.id, {
+        filename: "atomic.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "# Chapter 1\nWill fail"
+      })).toThrow(/simulated source failure/);
+      expect(database.prepare("SELECT count(*) AS count FROM source_documents").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM source_segmentations").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM source_segments").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe("numbered migrations", () => {
   it("migrates a temporary fixture copy without changing the frozen fixture", () => {
     const originalHash = fileHash(migration001FixturePath);
@@ -148,17 +313,38 @@ describe("numbered migrations", () => {
     }
   });
 
+  it("migrates the frozen M1-A fixture to the current schema in a temporary copy", () => {
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "migration-001.sqlite");
+    copyFileSync(migration001FixturePath, databasePath);
+    try {
+      const database = openDatabase(databasePath);
+      try {
+        expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "source_import" }
+        ]);
+        expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_documents'").get()).toEqual({
+          name: "source_documents"
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("is idempotent and records exact checksums", () => {
     const database = openDatabase();
     try {
-      const row = database.prepare("SELECT version, name, checksum FROM schema_migrations").get() as {
+      const rows = database.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all() as Array<{
         version: number;
         name: string;
         checksum: string;
-      };
-      expect(row.version).toBe(1);
-      expect(row.name).toBe("initial");
-      expect(row.checksum).toBeTruthy();
+      }>;
+      expect(rows.map((row) => [row.version, row.name])).toEqual([[1, "initial"], [2, "source_import"]]);
+      expect(rows.every((row) => row.checksum.length === 64)).toBe(true);
       expect(() => readMigrations()).not.toThrow();
     } finally {
       database.close();

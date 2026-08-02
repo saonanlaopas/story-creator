@@ -1,13 +1,15 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
-import { openDatabase, ProjectRepository } from "@story-creator/persistence";
+import { openDatabase, ProjectRepository, SourceRepository } from "@story-creator/persistence";
 import { runtimeConfig, staticRoot, type BuildAppOptions } from "./config.js";
 import { registerProjectRoutes } from "./routes/project-routes.js";
+import { registerSourceRoutes } from "./routes/source-routes.js";
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const database = openDatabase(options.databasePath ?? runtimeConfig().databasePath);
   const repository = new ProjectRepository(database);
+  const sourceRepository = new SourceRepository(database);
   const app = Fastify({ logger: options.logger ?? false });
 
   app.addHook("onClose", async () => {
@@ -16,6 +18,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get("/api/health", async () => ({ ok: true, service: "story-creator" }));
   registerProjectRoutes(app, repository);
+  registerSourceRoutes(app, sourceRepository);
 
   const webRoot = staticRoot(options.webDistPath);
   if (existsSync(webRoot)) {
