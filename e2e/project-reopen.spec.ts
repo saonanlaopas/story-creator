@@ -290,3 +290,89 @@ test("rejects invalid source files without creating source rows", async ({ page 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("creates, autosaves, checkpoints, and reopens a working manuscript", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-manuscript-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  let failNextSave = false;
+  const manuscriptPanel = page.locator("section.manuscript-panel");
+  try {
+    server = await startServer(databasePath, port);
+    await page.route("**/api/projects/*/manuscript/units/*/draft", async (route) => {
+      if (!failNextSave) {
+        await route.continue();
+        return;
+      }
+      failNextSave = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Simulated draft save failure" })
+      });
+    });
+
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Browser manuscript story");
+    await page.getByLabel("Import and mend").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
+
+    const sourceText = "# Chapter One\nOriginal first\n## Arrival\nOriginal second";
+    await page.getByLabel("Paste source text").fill(sourceText);
+    await page.getByRole("button", { name: "Import source" }).click();
+    await expect(page.getByRole("heading", { name: "Working manuscript" })).toBeVisible();
+
+    await manuscriptPanel.getByRole("button", { name: /Create working manuscript/ }).click();
+    await expect(manuscriptPanel.getByRole("button", { name: /Chapter One/ })).toBeVisible();
+    const secondUnit = manuscriptPanel.getByRole("button", { name: /Arrival/ });
+    await secondUnit.click();
+    await expect(secondUnit).toHaveAttribute("aria-current", "true");
+    const sourceComparison = page.getByTestId("manuscript-source-comparison");
+    const originalSecond = await sourceComparison.textContent();
+    expect(originalSecond).toContain("Original second");
+
+    const editor = page.getByTestId("manuscript-editor");
+    const firstEdit = `${await editor.inputValue()}\nBrowser autosave edit`;
+    await editor.fill(firstEdit);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saving");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await expect(sourceComparison).toHaveText(originalSecond ?? "");
+
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByTestId("checkpoint-result")).toHaveText("Checkpoint created");
+    const versionSummary = manuscriptPanel.locator(".editor-heading p.muted");
+    await expect(versionSummary).toContainText("Current version 2");
+    const checkpointVersion = await versionSummary.textContent();
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByTestId("checkpoint-result")).toHaveText(/Checkpoint reused/);
+    await expect(versionSummary).toHaveText(checkpointVersion ?? "");
+
+    failNextSave = true;
+    const retryText = `${firstEdit}\nRetry this save`;
+    await editor.fill(retryText);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saving");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Save failed", { timeout: 5_000 });
+    await expect(editor).toHaveValue(retryText);
+    await manuscriptPanel.getByRole("button", { name: "Retry save" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+
+    await page.goto("about:blank");
+    await stopServer(server.child);
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await expect(page.getByRole("heading", { name: "Browser manuscript story" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Working manuscript" })).toBeVisible();
+    const reopenedPanel = page.locator("section.manuscript-panel");
+    const reopenedUnit = reopenedPanel.getByRole("button", { name: /Arrival/ });
+    await expect(reopenedUnit).toHaveAttribute("aria-current", "true");
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(retryText);
+    await expect(page.getByTestId("manuscript-source-comparison")).toHaveText(originalSecond ?? "");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved");
+  } finally {
+    if (server) await stopServer(server.child);
+    await page.unroute("**/api/projects/*/manuscript/units/*/draft");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

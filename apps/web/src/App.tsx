@@ -3,6 +3,7 @@ import type { ChangeEvent, FormEvent } from "react";
 import type { CreateProjectInput, ProjectEntryMode, ProjectRecord, SourceInspection, SourceMediaType } from "@story-creator/domain";
 import { request, selectedProjectStorageKey, selectedSourceSegmentStorageKey } from "./api.js";
 import { projectModeLabel, projectModes } from "./project-modes.js";
+import { ManuscriptPanel } from "./manuscript-panel.js";
 import { SourcePanel } from "./source-panel.js";
 import { readSourceFile } from "./source-file.js";
 
@@ -282,6 +283,8 @@ export default function App() {
         onImport={(event) => void importSource(event)}
         onSelectSegment={selectSourceSegment}
       />
+
+      <ManuscriptPanel key={selectedProject?.id ?? "no-project"} project={selectedProject} source={selectedSource} />
     </main>
   );
 }

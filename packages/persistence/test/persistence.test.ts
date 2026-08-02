@@ -6,7 +6,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { openDatabase, ProjectRepository, readMigrations, SourceRepository, transaction } from "../src/index.js";
+import {
+  DraftRevisionConflictError,
+  ManuscriptRepository,
+  openDatabase,
+  ProjectRepository,
+  readMigrations,
+  SourceRepository,
+  transaction
+} from "../src/index.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof Sqlite;
@@ -16,6 +24,7 @@ function temporaryDirectory(): string {
 }
 
 const migration001FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-001.sqlite");
+const migration002FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-002.sqlite");
 const migration001Path = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "001_initial.sql");
 
 function fileHash(path: string): string {
@@ -336,6 +345,287 @@ describe("immutable source documents", () => {
   });
 });
 
+describe("autosaved working manuscript", () => {
+  it("creates one ordered unit, version, and draft per source segment without changing source", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Manuscript project", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000040"
+      });
+      const sources = new SourceRepository(database);
+      const source = sources.create(project.id, {
+        filename: "manuscript.md",
+        mediaType: "text/markdown",
+        encoding: "utf-8",
+        text: "# First\nAlpha\n## Second\nBravo\n---\nCharlie"
+      }, {
+        id: "00000000-0000-4000-8000-000000000041",
+        segmentationVersionId: "00000000-0000-4000-8000-000000000042"
+      });
+      const sourceBefore = sources.get(project.id, source.document.id);
+      const repository = new ManuscriptRepository(database);
+      const unitIds = [
+        "00000000-0000-4000-8000-000000000043",
+        "00000000-0000-4000-8000-000000000044",
+        "00000000-0000-4000-8000-000000000045"
+      ];
+      const versionIds = [
+        "00000000-0000-4000-8000-000000000046",
+        "00000000-0000-4000-8000-000000000047",
+        "00000000-0000-4000-8000-000000000048"
+      ];
+      const manuscript = repository.initialize(project.id, source.document.id, {
+        unitIds,
+        versionIds,
+        now: new Date("2025-01-03T00:00:00.000Z")
+      });
+
+      expect(manuscript.structure).toMatchObject({
+        projectId: project.id,
+        sourceDocumentId: source.document.id,
+        revision: 1,
+        activeUnitIds: unitIds
+      });
+      expect(manuscript.units).toHaveLength(source.segments.length);
+      manuscript.units.forEach((unit, position) => {
+        const sourceSegment = source.segments[position];
+        expect(sourceSegment).toBeDefined();
+        expect(unit.unit).toMatchObject({
+          id: unitIds[position],
+          projectId: project.id,
+          sourceDocumentId: source.document.id,
+          sourceSegmentId: sourceSegment?.id,
+          position,
+          currentVersionId: versionIds[position],
+          acceptedVersionId: null
+        });
+        expect(unit.currentVersion).toMatchObject({
+          id: versionIds[position],
+          manuscriptUnitId: unitIds[position],
+          versionNumber: 1,
+          title: sourceSegment?.heading,
+          prose: sourceSegment?.text,
+          sourceDocumentId: source.document.id,
+          sourceSegmentId: sourceSegment?.id
+        });
+        expect(unit.draft).toMatchObject({
+          manuscriptUnitId: unitIds[position],
+          prose: sourceSegment?.text,
+          revision: 1,
+          fingerprint: unit.currentVersion.fingerprint
+        });
+        expect(unit.sourceComparison?.segment.id).toBe(sourceSegment?.id);
+      });
+      expect(sources.get(project.id, source.document.id)).toEqual(sourceBefore);
+      expect(repository.get(project.id)).toEqual(manuscript);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps the accepted empty-source behavior by creating one empty unit", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Empty manuscript", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000050"
+      });
+      const source = new SourceRepository(database).create(project.id, {
+        filename: "empty.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: ""
+      });
+      const manuscript = new ManuscriptRepository(database).initialize(project.id, source.document.id);
+      expect(manuscript.units).toHaveLength(1);
+      expect(manuscript.units[0]?.draft.prose).toBe("");
+      expect(manuscript.units[0]?.unit.position).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rolls back all manuscript rows after a later initial-creation write fails", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Rollback manuscript", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000060"
+      });
+      const source = new SourceRepository(database).create(project.id, {
+        filename: "rollback.md",
+        mediaType: "text/markdown",
+        encoding: "utf-8",
+        text: "# One\nfirst\n# Two\nsecond"
+      });
+      const before = new SourceRepository(database).get(project.id, source.document.id);
+      const unitIds = [
+        "00000000-0000-4000-8000-000000000061",
+        "00000000-0000-4000-8000-000000000062"
+      ];
+      database.exec(
+        `CREATE TRIGGER fail_second_manuscript_draft
+         BEFORE INSERT ON manuscript_drafts
+         WHEN NEW.manuscript_unit_id = '${unitIds[1]}'
+         BEGIN SELECT RAISE(ABORT, 'simulated manuscript creation failure'); END`
+      );
+      expect(() => new ManuscriptRepository(database).initialize(project.id, source.document.id, {
+        unitIds,
+        versionIds: [
+          "00000000-0000-4000-8000-000000000063",
+          "00000000-0000-4000-8000-000000000064"
+        ]
+      })).toThrow(/simulated manuscript creation failure/);
+      for (const table of ["manuscript_structures", "manuscript_units", "manuscript_unit_versions", "manuscript_drafts", "manuscript_unit_order"]) {
+        expect(database.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+      }
+      expect(new SourceRepository(database).get(project.id, source.document.id)).toEqual(before);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("saves material drafts, preserves stable IDs, keeps structure revision, and reuses no-op checkpoints", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Draft manuscript", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000070"
+      });
+      const source = new SourceRepository(database).create(project.id, {
+        filename: "draft.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Original prose"
+      });
+      const repository = new ManuscriptRepository(database);
+      const initial = repository.initialize(project.id, source.document.id, {
+        unitIds: ["00000000-0000-4000-8000-000000000071"],
+        versionIds: ["00000000-0000-4000-8000-000000000072"]
+      });
+      const unit = initial.units[0];
+      if (!unit) throw new Error("Expected one manuscript unit");
+      const saved = repository.saveDraft(project.id, unit.unit.id, {
+        prose: "Edited prose",
+        expectedRevision: 1
+      }, { now: new Date("2025-01-04T00:00:00.000Z") });
+      expect(saved.changed).toBe(true);
+      expect(saved.draft).toMatchObject({ prose: "Edited prose", revision: 2 });
+      expect(saved.draft.fingerprint).not.toBe(unit.draft.fingerprint);
+      expect(saved.manuscript.structure.revision).toBe(1);
+      expect(saved.manuscript.units[0]?.unit.id).toBe(unit.unit.id);
+      expect(saved.manuscript.units[0]?.currentVersion.id).toBe(unit.currentVersion.id);
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_unit_versions WHERE manuscript_unit_id = ?").get(unit.unit.id)).toEqual({ count: 1 });
+
+      const noOp = repository.saveDraft(project.id, unit.unit.id, {
+        prose: "Edited prose",
+        expectedRevision: 2
+      });
+      expect(noOp.changed).toBe(false);
+      expect(noOp.draft).toEqual(saved.draft);
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_unit_versions WHERE manuscript_unit_id = ?").get(unit.unit.id)).toEqual({ count: 1 });
+
+      const checkpoint = repository.checkpoint(project.id, unit.unit.id, {
+        versionId: "00000000-0000-4000-8000-000000000073",
+        now: new Date("2025-01-05T00:00:00.000Z")
+      });
+      expect(checkpoint.created).toBe(true);
+      expect(checkpoint.version).toMatchObject({
+        id: "00000000-0000-4000-8000-000000000073",
+        versionNumber: 2,
+        prose: "Edited prose"
+      });
+      expect(checkpoint.manuscript.units[0]?.unit.currentVersionId).toBe(checkpoint.version.id);
+      expect(checkpoint.manuscript.units[0]?.unit.acceptedVersionId).toBeNull();
+
+      const repeated = repository.checkpoint(project.id, unit.unit.id);
+      expect(repeated.created).toBe(false);
+      expect(repeated.version.id).toBe(checkpoint.version.id);
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_unit_versions WHERE manuscript_unit_id = ?").get(unit.unit.id)).toEqual({ count: 2 });
+
+      database.prepare("UPDATE manuscript_units SET accepted_version_id = ? WHERE id = ?").run(unit.currentVersion.id, unit.unit.id);
+      const savedAfterAcceptedPointer = repository.saveDraft(project.id, unit.unit.id, {
+        prose: "Final prose",
+        expectedRevision: 2
+      });
+      const nextCheckpoint = repository.checkpoint(project.id, unit.unit.id);
+      expect(savedAfterAcceptedPointer.manuscript.structure.revision).toBe(1);
+      expect(nextCheckpoint.manuscript.units[0]?.unit.currentVersionId).not.toBe(unit.currentVersion.id);
+      expect(nextCheckpoint.manuscript.units[0]?.unit.acceptedVersionId).toBe(unit.currentVersion.id);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects stale and failed saves without replacing the persisted draft", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Conflict manuscript", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000080"
+      });
+      const source = new SourceRepository(database).create(project.id, {
+        filename: "conflict.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Persisted"
+      });
+      const repository = new ManuscriptRepository(database);
+      const manuscript = repository.initialize(project.id, source.document.id);
+      const unit = manuscript.units[0];
+      if (!unit) throw new Error("Expected one manuscript unit");
+      const saved = repository.saveDraft(project.id, unit.unit.id, { prose: "First edit", expectedRevision: 1 });
+      expect(() => repository.saveDraft(project.id, unit.unit.id, { prose: "Stale edit", expectedRevision: 1 })).toThrow(DraftRevisionConflictError);
+      try {
+        repository.saveDraft(project.id, unit.unit.id, { prose: "Stale edit", expectedRevision: 1 });
+      } catch (error) {
+        expect(error).toBeInstanceOf(DraftRevisionConflictError);
+        if (error instanceof DraftRevisionConflictError) {
+          expect(error.currentDraft).toEqual(saved.draft);
+        }
+      }
+      database.exec("CREATE TRIGGER fail_manuscript_draft_update BEFORE UPDATE ON manuscript_drafts BEGIN SELECT RAISE(ABORT, 'simulated draft save failure'); END");
+      expect(() => repository.saveDraft(project.id, unit.unit.id, { prose: "Failed edit", expectedRevision: 2 })).toThrow(/simulated draft save failure/);
+      expect(repository.get(project.id)?.units[0]?.draft).toEqual(saved.draft);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("enforces ownership, immutable version updates, and project cascade cleanup", () => {
+    const database = openDatabase();
+    try {
+      const projects = new ProjectRepository(database);
+      const owner = projects.create({ name: "Manuscript owner", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000090"
+      });
+      const other = projects.create({ name: "Other manuscript owner", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000091"
+      });
+      const sources = new SourceRepository(database);
+      const source = sources.create(owner.id, {
+        filename: "owned.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "Owned"
+      });
+      const repository = new ManuscriptRepository(database);
+      const manuscript = repository.initialize(owner.id, source.document.id);
+      const unit = manuscript.units[0];
+      if (!unit) throw new Error("Expected one manuscript unit");
+      expect(repository.get(other.id)).toBeUndefined();
+      expect(() => repository.saveDraft(other.id, unit.unit.id, { prose: "Cross owner", expectedRevision: 1 })).toThrow(/not found/i);
+      expect(() => database.prepare("UPDATE manuscript_unit_versions SET prose = ? WHERE id = ?").run("Changed", unit.currentVersion.id)).toThrow(/immutable/i);
+      expect(repository.get(owner.id)?.units[0]?.currentVersion.prose).toBe("Owned");
+
+      database.prepare("DELETE FROM projects WHERE id = ?").run(owner.id);
+      expect(repository.get(owner.id)).toBeUndefined();
+      for (const table of ["manuscript_structures", "manuscript_units", "manuscript_unit_versions", "manuscript_drafts", "manuscript_unit_order"]) {
+        expect(database.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+      }
+      expect(projects.get(other.id)?.name).toBe("Other manuscript owner");
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe("numbered migrations", () => {
   it("migrates a temporary fixture copy without changing the frozen fixture", () => {
     const originalHash = fileHash(migration001FixturePath);
@@ -391,16 +681,57 @@ describe("numbered migrations", () => {
       try {
         expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
           { version: 1, name: "initial" },
-          { version: 2, name: "source_import" }
+          { version: 2, name: "source_import" },
+          { version: 3, name: "manuscript" }
         ]);
         expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_documents'").get()).toEqual({
           name: "source_documents"
+        });
+        expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manuscript_units'").get()).toEqual({
+          name: "manuscript_units"
         });
       } finally {
         database.close();
       }
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates a frozen M1-B1 fixture in a temporary copy and preserves source rows", () => {
+    const originalHash = fileHash(migration002FixturePath);
+    const originalDatabase = new DatabaseSync(migration002FixturePath, { readOnly: true });
+    const sourceDocumentsBefore = originalDatabase
+      .prepare("SELECT * FROM source_documents ORDER BY id")
+      .all();
+    const sourceSegmentationsBefore = originalDatabase
+      .prepare("SELECT * FROM source_segmentations ORDER BY id")
+      .all();
+    const sourceSegmentsBefore = originalDatabase
+      .prepare("SELECT * FROM source_segments ORDER BY source_document_id, position")
+      .all();
+    originalDatabase.close();
+
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "migration-002.sqlite");
+    copyFileSync(migration002FixturePath, databasePath);
+    try {
+      const database = openDatabase(databasePath);
+      try {
+        expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "source_import" },
+          { version: 3, name: "manuscript" }
+        ]);
+        expect(database.prepare("SELECT * FROM source_documents ORDER BY id").all()).toEqual(sourceDocumentsBefore);
+        expect(database.prepare("SELECT * FROM source_segmentations ORDER BY id").all()).toEqual(sourceSegmentationsBefore);
+        expect(database.prepare("SELECT * FROM source_segments ORDER BY source_document_id, position").all()).toEqual(sourceSegmentsBefore);
+      } finally {
+        database.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      expect(fileHash(migration002FixturePath)).toBe(originalHash);
     }
   });
 
@@ -412,7 +743,7 @@ describe("numbered migrations", () => {
         name: string;
         checksum: string;
       }>;
-      expect(rows.map((row) => [row.version, row.name])).toEqual([[1, "initial"], [2, "source_import"]]);
+      expect(rows.map((row) => [row.version, row.name])).toEqual([[1, "initial"], [2, "source_import"], [3, "manuscript"]]);
       expect(rows.every((row) => row.checksum.length === 64)).toBe(true);
       expect(() => readMigrations()).not.toThrow();
     } finally {

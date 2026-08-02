@@ -8,6 +8,30 @@ export {
 } from "./project.js";
 export type { CreateProjectInput, ProjectEntryMode, ProjectRecord, ProjectStatus } from "./project.js";
 export {
+  createManuscriptInputSchema,
+  manuscriptDraftSchema,
+  manuscriptSourceComparisonSchema,
+  manuscriptStructureSchema,
+  manuscriptUnitSchema,
+  manuscriptUnitVersionSchema,
+  manuscriptUnitViewSchema,
+  manuscriptViewSchema,
+  parseCreateManuscriptInput,
+  parseSaveManuscriptDraftInput,
+  saveManuscriptDraftInputSchema
+} from "./manuscript.js";
+export type {
+  CreateManuscriptInput,
+  ManuscriptDraft,
+  ManuscriptSourceComparison,
+  ManuscriptStructure,
+  ManuscriptUnit,
+  ManuscriptUnitVersion,
+  ManuscriptUnitView,
+  ManuscriptView,
+  SaveManuscriptDraftInput
+} from "./manuscript.js";
+export {
   normalizeSourceText,
   parseSourceImportInput,
   segmentNormalizedSource,

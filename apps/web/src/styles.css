@@ -70,5 +70,26 @@ dd { margin: 0; }
 .source-detail { min-width: 0; }
 .source-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow: auto; background: #f8fafc; border: 1px solid #e4e7eb; border-radius: 10px; padding: 14px; margin: 0 0 18px; font: inherit; }
 .source-hash { overflow-wrap: anywhere; font-size: .78rem; }
+.manuscript-panel { margin-top: 20px; }
+.manuscript-summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+.manuscript-summary p { margin: 0; }
+.manuscript-reader-grid { display: grid; grid-template-columns: minmax(220px, .35fr) minmax(0, 1fr); gap: 20px; }
+.manuscript-reader-grid h3 { margin: 0 0 10px; font-size: 1rem; }
+.manuscript-editor-column { min-width: 0; }
+.editor-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.editor-heading h3 { margin: 0; font-size: 1.2rem; }
+.editor-heading p { margin: 4px 0 0; }
+.save-state { font-weight: 700; white-space: nowrap; }
+.save-state.saved { color: #276749; }
+.save-state.saving { color: #975a16; }
+.save-state.failed { color: #9b2c2c; }
+.manuscript-editor-column textarea { width: 100%; resize: vertical; border: 1px solid #bcccdc; border-radius: 9px; padding: 11px 12px; font: inherit; line-height: 1.5; margin: 8px 0 8px; }
+.manuscript-editor-column textarea:focus-visible { outline: 3px solid #c4b5fd; outline-offset: 2px; }
+.retry-button { display: block; margin-bottom: 18px; }
+.source-comparison { margin-top: 20px; border-top: 1px solid #e4e7eb; padding-top: 18px; }
+.source-comparison h3 { margin-bottom: 4px; }
+.source-comparison p { margin: 0 0 8px; }
+.source-comparison pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; background: #f8fafc; border: 1px solid #e4e7eb; border-radius: 10px; padding: 14px; margin: 0; font: inherit; }
+.notice.success { background: #f0fff4; border: 1px solid #9ae6b4; color: #276749; }
 @media (max-width: 640px) { .shell { padding: 28px 16px 48px; } .selected-card { display: block; } dl { margin-top: 16px; } }
-@media (max-width: 760px) { .source-reader-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .source-reader-grid, .manuscript-reader-grid { grid-template-columns: 1fr; } }
