@@ -2,12 +2,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { kernelProbeExecutionPolicy } from "@story-creator/domain";
 import {
   openDatabase,
   ProjectRepository,
   ProviderRunNotFoundError,
   ProviderRunRepository,
-  ProviderRunStateError
+  ProviderRunStateError,
+  canonicalJson
 } from "../src/index.js";
 
 const runInput = {
@@ -35,6 +37,7 @@ describe("provider run persistence", () => {
           id: "00000000-0000-4000-8000-000000000202",
           status: "pending",
           input: runInput.input,
+          executionPolicy: kernelProbeExecutionPolicy,
           attemptNumber: 1,
           retryOfRunId: null,
           startedAt: null,
@@ -43,6 +46,9 @@ describe("provider run persistence", () => {
         candidate: null
       });
       expect(pending.run.inputFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(database.prepare("SELECT execution_policy_json FROM provider_runs WHERE id = ?").get(pending.run.id)).toEqual({
+        execution_policy_json: canonicalJson(kernelProbeExecutionPolicy)
+      });
 
       repository.markRunning(project.id, pending.run.id, { now: new Date("2025-01-01T00:01:00.000Z") });
       const completed = repository.complete(project.id, pending.run.id, {

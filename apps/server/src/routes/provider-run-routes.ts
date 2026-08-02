@@ -5,7 +5,7 @@ import {
   ProviderRunStateError,
   type ProjectRepository
 } from "@story-creator/persistence";
-import type { ProviderRunService } from "../services/provider-run-service.js";
+import { ProviderRunValidationError, type ProviderRunService } from "../services/provider-run-service.js";
 import { readableValidationError } from "./project-routes.js";
 
 interface ProjectParams {
@@ -17,6 +17,9 @@ interface RunParams extends ProjectParams {
 }
 
 function providerRunError(error: unknown, reply: { code(statusCode: number): { send(body: unknown): unknown } }): unknown {
+  if (error instanceof ProviderRunValidationError) {
+    return reply.code(400).send({ error: error.message, code: error.code });
+  }
   if (error instanceof ProviderRunNotFoundError) {
     return reply.code(404).send({ error: error.message });
   }

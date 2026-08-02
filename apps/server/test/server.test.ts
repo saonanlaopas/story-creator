@@ -1,9 +1,18 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { kernelProbeExecutionPolicy } from "@story-creator/domain";
 import { buildApp } from "../src/index.js";
-import { openDatabase, ProviderRunRepository } from "@story-creator/persistence";
+import { FakeProvider } from "../src/providers/fake-provider.js";
+import { OpenRouterProvider } from "../src/providers/openrouter-provider.js";
+import { canonicalJson, openDatabase, ProviderRunRepository } from "@story-creator/persistence";
+
+function valueAtCanonicalBytes(target: number): { value: string } {
+  const emptyBytes = Buffer.byteLength(canonicalJson({ value: "" }), "utf8");
+  return { value: "x".repeat(target - emptyBytes) };
+}
 
 describe("server API", () => {
   it("serves health and project create/list/get routes", async () => {
@@ -354,6 +363,97 @@ describe("server API", () => {
       expect(credentialInput.statusCode).toBe(400);
       expect(credentialInput.json().error).toMatch(/credentials/i);
       expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` })).json()).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects oversized provider input before creating a row or calling a provider", async () => {
+    const fake = new FakeProvider();
+    const app = await buildApp({ databasePath: ":memory:", providers: [fake] });
+    try {
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Bounded API project", entryMode: "premise" }
+      });
+      const projectId = project.json().id as string;
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: valueAtCanonicalBytes(kernelProbeExecutionPolicy.maxCanonicalInputBytes + 1)
+        }
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json()).toMatchObject({ code: "PROVIDER_INPUT_TOO_LARGE" });
+      expect(rejected.json().error).toMatch(/UTF-8 bytes|limit/i);
+      expect(fake.calls).toHaveLength(0);
+      expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` })).json()).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("redacts an exact configured OpenRouter secret from API JSON and enabled logs", async () => {
+    const apiKey = "local-development-secret-123";
+    let logs = "";
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs += chunk.toString();
+        callback();
+      }
+    });
+    const openRouter = new OpenRouterProvider({
+      apiKey,
+      fetch: async () => new Response(JSON.stringify({
+        error: { message: `Upstream echoed ${apiKey} without a credential prefix` }
+      }), {
+        status: 502,
+        headers: { "content-type": "application/json" }
+      })
+    });
+    const app = await buildApp({ databasePath: ":memory:", providers: [openRouter], logger: { stream } });
+    try {
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Exact secret API project", entryMode: "premise" }
+      });
+      const projectId = project.json().id as string;
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "openrouter",
+          model: "offline/stub",
+          scope: { type: "project" },
+          input: { title: "Redaction test" }
+        }
+      });
+      const runId = created.json().run.id as string;
+      const executed = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(executed.statusCode).toBe(200);
+      expect(executed.json().run.error.message).toContain("[REDACTED]");
+      expect(executed.body).not.toContain(apiKey);
+
+      const persisted = await app.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(persisted.body).not.toContain(apiKey);
+      app.log.info({ providerRun: executed.json() }, "provider run result");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(logs).not.toContain(apiKey);
+      expect(logs).toContain("[REDACTED]");
     } finally {
       await app.close();
     }

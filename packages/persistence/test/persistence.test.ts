@@ -742,7 +742,8 @@ describe("numbered migrations", () => {
           { version: 1, name: "initial" },
           { version: 2, name: "source_import" },
           { version: 3, name: "manuscript" },
-          { version: 4, name: "provider_runs" }
+          { version: 4, name: "provider_runs" },
+          { version: 5, name: "provider_run_policies" }
         ]);
         expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_documents'").get()).toEqual({
           name: "source_documents"
@@ -785,7 +786,8 @@ describe("numbered migrations", () => {
           { version: 1, name: "initial" },
           { version: 2, name: "source_import" },
           { version: 3, name: "manuscript" },
-          { version: 4, name: "provider_runs" }
+          { version: 4, name: "provider_runs" },
+          { version: 5, name: "provider_run_policies" }
         ]);
         expect(database.prepare("SELECT * FROM source_documents ORDER BY id").all()).toEqual(sourceDocumentsBefore);
         expect(database.prepare("SELECT * FROM source_segmentations ORDER BY id").all()).toEqual(sourceSegmentationsBefore);
@@ -820,7 +822,8 @@ describe("numbered migrations", () => {
           { version: 1, name: "initial" },
           { version: 2, name: "source_import" },
           { version: 3, name: "manuscript" },
-          { version: 4, name: "provider_runs" }
+          { version: 4, name: "provider_runs" },
+          { version: 5, name: "provider_run_policies" }
         ]);
         expect(database.prepare("SELECT * FROM projects ORDER BY id").all()).toEqual(projectBefore);
         expect(database.prepare("SELECT * FROM manuscript_structures ORDER BY project_id").all()).toEqual(structuresBefore);
@@ -850,7 +853,8 @@ describe("numbered migrations", () => {
         [1, "initial"],
         [2, "source_import"],
         [3, "manuscript"],
-        [4, "provider_runs"]
+        [4, "provider_runs"],
+        [5, "provider_run_policies"]
       ]);
       expect(rows.every((row) => row.checksum.length === 64)).toBe(true);
       expect(() => readMigrations()).not.toThrow();

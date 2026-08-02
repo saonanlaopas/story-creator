@@ -50,11 +50,11 @@ function responseContent(response: OpenRouterResponse): string {
   throw new ProviderExecutionError("PROVIDER_RESPONSE_INVALID", "OpenRouter returned no completion content", true);
 }
 
-function providerError(status: number, response: OpenRouterResponse): ProviderExecutionError {
+function providerError(status: number, response: OpenRouterResponse, redactionSecrets: readonly string[]): ProviderExecutionError {
   const rawMessage = typeof response.error?.message === "string"
     ? response.error.message
     : `OpenRouter request failed (${status})`;
-  const message = redactProviderText(rawMessage).slice(0, 500);
+  const message = redactProviderText(rawMessage, redactionSecrets).slice(0, 500);
   if (status === 401) return new ProviderExecutionError("PROVIDER_UNAUTHENTICATED", message, false);
   if (status === 402) return new ProviderExecutionError("PROVIDER_INSUFFICIENT_CREDITS", message, false);
   if (status === 429) return new ProviderExecutionError("PROVIDER_RATE_LIMITED", message, true);
@@ -98,14 +98,17 @@ export class OpenRouterProvider implements StoryProvider {
         body: JSON.stringify({
           model: request.model,
           messages: kernelProbeMessages(request.input),
-          response_format: { type: "json_object" }
+          response_format: { type: "json_object" },
+          max_tokens: request.maxOutputTokens
         })
       });
     } catch (error) {
       if (request.signal.aborted) {
         throw new ProviderExecutionError("PROVIDER_CANCELLED", "Provider request was cancelled", true);
       }
-      const message = error instanceof Error ? redactProviderText(error.message) : "OpenRouter request failed";
+      const message = error instanceof Error
+        ? redactProviderText(error.message, [this.options.apiKey])
+        : "OpenRouter request failed";
       throw new ProviderExecutionError("PROVIDER_FAILURE", message.slice(0, 500), true);
     }
 
@@ -115,9 +118,9 @@ export class OpenRouterProvider implements StoryProvider {
     } catch {
       throw new ProviderExecutionError("PROVIDER_RESPONSE_INVALID", "OpenRouter returned invalid JSON", true);
     }
-    if (!response.ok || envelope.error) throw providerError(response.status, envelope);
+    if (!response.ok || envelope.error) throw providerError(response.status, envelope, [this.options.apiKey]);
 
-    const content = responseContent(envelope);
+    const content = redactProviderText(responseContent(envelope), [this.options.apiKey]);
     let output: unknown;
     try {
       output = JSON.parse(content) as unknown;

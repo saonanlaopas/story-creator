@@ -21,6 +21,33 @@ export type ProviderRunKind = (typeof providerRunKinds)[number];
 export const providerRunStatuses = ["pending", "running", "completed", "failed", "cancelled"] as const;
 export type ProviderRunStatus = (typeof providerRunStatuses)[number];
 
+export const providerExecutionPolicySchema = z
+  .object({
+    version: z.string().trim().min(1),
+    maxCanonicalInputBytes: z.number().int().positive(),
+    maxOutputTokens: z.number().int().positive(),
+    maxCanonicalValidatedOutputBytes: z.number().int().positive(),
+    timeoutMs: z.number().int().positive()
+  })
+  .strict();
+
+export type ProviderExecutionPolicy = z.infer<typeof providerExecutionPolicySchema>;
+
+export const kernelProbeExecutionPolicy = Object.freeze({
+  version: "kernel-probe-execution-v1",
+  maxCanonicalInputBytes: 4_096,
+  maxOutputTokens: 256,
+  maxCanonicalValidatedOutputBytes: 8_192,
+  timeoutMs: 30_000
+} satisfies ProviderExecutionPolicy);
+
+export function providerExecutionPolicyForKind(kind: ProviderRunKind): ProviderExecutionPolicy {
+  switch (kind) {
+    case "kernel-probe":
+      return kernelProbeExecutionPolicy;
+  }
+}
+
 export const providerRunScopeSchema = z
   .object({
     type: z.literal("project")
@@ -98,6 +125,7 @@ export const providerRunSchema = z
     scope: providerRunScopeSchema,
     input: jsonValueSchema,
     inputFingerprint: fingerprintSchema,
+    executionPolicy: providerExecutionPolicySchema,
     attemptNumber: z.number().int().positive(),
     retryOfRunId: z.string().uuid().nullable(),
     error: providerRunErrorSchema.nullable(),

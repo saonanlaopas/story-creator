@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  kernelProbeExecutionPolicy,
   kernelProbeCandidateSchema,
   parseCreateProviderRunInput,
+  providerExecutionPolicyForKind,
   providerUsageSchema
 } from "../src/index.js";
 
@@ -46,5 +48,16 @@ describe("provider run domain contracts", () => {
     });
     expect(() => kernelProbeCandidateSchema.parse({ echo: "missing version" })).toThrow();
     expect(() => providerUsageSchema.parse({ inputTokens: 4, outputTokens: 3, totalTokens: 6 })).toThrow(/total/i);
+  });
+
+  it("exposes the immutable kernel execution policy", () => {
+    expect(providerExecutionPolicyForKind("kernel-probe")).toEqual(kernelProbeExecutionPolicy);
+    expect(kernelProbeExecutionPolicy).toEqual({
+      version: "kernel-probe-execution-v1",
+      maxCanonicalInputBytes: 4096,
+      maxOutputTokens: 256,
+      maxCanonicalValidatedOutputBytes: 8192,
+      timeoutMs: 30_000
+    });
   });
 });

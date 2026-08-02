@@ -6,10 +6,13 @@ import type {
   ProviderRunCandidate,
   ProviderRunDetail,
   ProviderRunError,
+  ProviderExecutionPolicy,
   ProviderUsage
 } from "@story-creator/domain";
 import {
   jsonValueSchema,
+  providerExecutionPolicyForKind,
+  providerExecutionPolicySchema,
   parseCreateProviderRunInput,
   providerRunCandidateSchema,
   providerRunDetailSchema,
@@ -30,6 +33,7 @@ interface ProviderRunRow {
   scope_json: string;
   input_json: string;
   input_fingerprint: string;
+  execution_policy_json: string;
   attempt_number: number;
   retry_of_run_id: string | null;
   error_json: string | null;
@@ -106,6 +110,7 @@ function runFromRow(row: ProviderRunRow): ProviderRun {
     scope: JSON.parse(row.scope_json) as unknown,
     input: parseStoredJson(row.input_json),
     inputFingerprint: row.input_fingerprint,
+    executionPolicy: providerExecutionPolicySchema.parse(JSON.parse(row.execution_policy_json) as unknown),
     attemptNumber: row.attempt_number,
     retryOfRunId: row.retry_of_run_id,
     error: row.error_json ? JSON.parse(row.error_json) as unknown : null,
@@ -128,7 +133,7 @@ function candidateFromRow(row: ProviderRunCandidateRow): ProviderRunCandidate {
 }
 
 const runColumns = `id, project_id, kind, provider, model, status, scope_json, input_json,
-  input_fingerprint, attempt_number, retry_of_run_id, error_json, usage_json, created_at,
+  input_fingerprint, execution_policy_json, attempt_number, retry_of_run_id, error_json, usage_json, created_at,
   updated_at, started_at, finished_at`;
 
 export class ProviderRunRepository {
@@ -140,7 +145,7 @@ export class ProviderRunRepository {
     options: CreateProviderRunOptions = {}
   ): ProviderRunDetail {
     const parsed = parseCreateProviderRunInput(input);
-    return this.insertPending(projectId, parsed, 1, null, options);
+    return this.insertPending(projectId, parsed, providerExecutionPolicyForKind(parsed.kind), 1, null, options);
   }
 
   public createRetry(
@@ -158,7 +163,7 @@ export class ProviderRunRepository {
       model: previous.model,
       scope: previous.scope,
       input: previous.input
-    }, previous.attemptNumber + 1, previous.id, options);
+    }, previous.executionPolicy, previous.attemptNumber + 1, previous.id, options);
   }
 
   public get(projectId: string, runId: string): ProviderRunDetail | undefined {
@@ -329,6 +334,7 @@ export class ProviderRunRepository {
   private insertPending(
     projectId: string,
     input: CreateProviderRunInput,
+    executionPolicy: ProviderExecutionPolicy,
     attemptNumber: number,
     retryOfRunId: string | null,
     options: CreateProviderRunOptions
@@ -345,6 +351,7 @@ export class ProviderRunRepository {
       scope: input.scope,
       input: input.input,
       inputFingerprint: jsonFingerprint(input.input),
+      executionPolicy: providerExecutionPolicySchema.parse(executionPolicy),
       attemptNumber,
       retryOfRunId,
       error: null,
@@ -359,9 +366,9 @@ export class ProviderRunRepository {
         .prepare(
           `INSERT INTO provider_runs
             (id, project_id, kind, provider, model, status, scope_json, input_json,
-             input_fingerprint, attempt_number, retry_of_run_id, error_json, usage_json,
+             input_fingerprint, execution_policy_json, attempt_number, retry_of_run_id, error_json, usage_json,
              created_at, updated_at, started_at, finished_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`
         )
         .run(
           run.id,
@@ -373,6 +380,7 @@ export class ProviderRunRepository {
           canonicalJson(run.scope),
           canonicalJson(run.input),
           run.inputFingerprint,
+          canonicalJson(run.executionPolicy),
           run.attemptNumber,
           run.retryOfRunId,
           run.createdAt,

@@ -6,6 +6,7 @@ export interface ProviderRequest {
   model: string;
   scope: ProviderRunScope;
   input: JsonValue;
+  maxOutputTokens: number;
   signal: AbortSignal;
 }
 
@@ -34,8 +35,12 @@ const bearerPattern = /(Bearer\s+)[^\s,}"']+/gi;
 const environmentPattern = /(OPENROUTER_API_KEY\s*[=:]\s*)[^\s,}"']+/gi;
 const openRouterKeyPattern = /\bsk-or-v1-[A-Za-z0-9_.-]{8,}\b/g;
 
-export function redactProviderText(value: string): string {
-  return value
+export function redactProviderText(value: string, knownSecrets: readonly string[] = []): string {
+  const secrets = [...new Set(knownSecrets)]
+    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0)
+    .sort((left, right) => right.length - left.length);
+  const exactRedacted = secrets.reduce((current, secret) => current.split(secret).join("[REDACTED]"), value);
+  return exactRedacted
     .replace(bearerPattern, "$1[REDACTED]")
     .replace(environmentPattern, "$1[REDACTED]")
     .replace(openRouterKeyPattern, "[REDACTED]");
