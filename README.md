@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This folder is a self-contained product and implementation handoff for a separate Story Creator application. Copy the whole folder into the root of the new repository before implementation begins.
+This repository contains the Story Creator planning package and the implemented checkpoint 1A application core. The planning documents remain the product and engineering contract for subsequent checkpoints.
 
 Story Creator is a local-first AI-assisted long-form fiction workspace. A writer can:
 
@@ -21,11 +21,12 @@ The application uses OpenRouter for deliberate AI work. Direct editing, project 
 2. [02-domain-and-versioning.md](02-domain-and-versioning.md) — canonical data, provenance, versions, scopes, and proposals.
 3. [03-ai-and-chat-workflows.md](03-ai-and-chat-workflows.md) — suggestion, extraction, mending, continuation, drafting, and assistant behavior.
 4. [04-interface-design.md](04-interface-design.md) — guided workspace, manuscript editor, assistant, and review surfaces.
-5. [05-implementation-roadmap.md](05-implementation-roadmap.md) — sequential engineering foundations and acceptance gates.
+5. [05-implementation-roadmap.md](05-implementation-roadmap.md) — the focused first milestone, later roadmap, and acceptance gates.
 6. [06-cyoa-reuse-map.md](06-cyoa-reuse-map.md) — what to copy, adapt, or leave behind from Story to CYOA.
 7. [07-handoff-prompt.md](07-handoff-prompt.md) — prompts for starting and continuing implementation in the new repository.
+8. [story-creator-luna-implementation-plan.md](story-creator-luna-implementation-plan.md) — detailed Milestone 1 checkpoints, contracts, lane routing, verification, and review protocol.
 
-## Settled product decisions
+## Settled long-term product decisions
 
 1. The manuscript and structured project artifacts are canonical; chat is an interface over them.
 2. The assistant can suggest or draft every stage. Blank-form completion is never the only path.
@@ -49,7 +50,7 @@ The initial release does not need choice graphs, stats, relationship mechanics, 
 
 ## Recommended first implementation
 
-Implement only Foundation 1 from the roadmap after moving this package. Do not begin by calling a live model. Establish the project, source, manuscript, artifact, version, workflow, and local import contracts with offline tests first.
+Build Milestone 1 from the roadmap as a sequence of separately reviewed checkpoints. The milestone is a focused vertical slice: import or paste a story, derive a Bible and Flow, edit with autosave, discuss through persistent scoped chat, mend selected prose, and continue with one reviewed next unit. Use the detailed Luna implementation plan as the engineering handoff. Do not make a live model call during automated verification.
 
 ## Checkpoint 1A implementation quickstart
 

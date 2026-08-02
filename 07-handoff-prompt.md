@@ -1,47 +1,84 @@
-# New-project handoff
+# Story Creator implementation handoff
 
-## Setup checklist
+## Current direction
 
-1. Create a separate Story Creator directory and Git repository.
-2. Copy the complete `story-creator-planning` folder into it.
-3. Add a short root README that points to the planning package.
-4. Add an appropriate `.gitignore` and make an explicit license decision.
-5. Commit the planning package before copying or writing application code.
-6. Give the implementing Codex task both the new repository path and the local path or commit for Story-to-CYOA.
-7. Begin with Foundation 1 only. Copy later infrastructure when its foundation requires it.
+Checkpoint 1A is complete. The next delivery target is Milestone 1 from
+`05-implementation-roadmap.md`: a focused import, understand, chat, mend, and continue
+vertical slice.
 
-## Initial implementation prompt
+Use `story-creator-luna-implementation-plan.md` as the detailed engineering contract.
+Do not ask an implementation task to complete the whole milestone at once.
 
-Copy and adjust the two absolute paths before using this prompt:
+## Checkpoint request template
 
-> Implement Foundation 1 of Story Creator from the committed planning package in `<NEW_STORY_CREATOR_REPOSITORY>`.
+> Use `$sol-advisor:orchestration` to implement Story Creator checkpoint `<ID and
+> title>` from the committed Milestone 1 plan.
 >
-> Before changing anything, read every document in `story-creator-planning`, inspect the current repository state, and inspect the reusable Story-to-CYOA source at `<CYOA_REPOSITORY>` using `story-creator-planning/06-cyoa-reuse-map.md` as the boundary. Tell me what you find before making changes. Do not turn the existing CYOA application into Story Creator; this is a separate product and repository.
+> Before delegation, inspect the current repository, `AGENTS.md`, the roadmap, the
+> complete Luna implementation plan, all planning documents relevant to this
+> checkpoint, the preceding checkpoint's evidence, and the Story-to-CYOA repository
+> only where `06-cyoa-reuse-map.md` permits reuse. Treat accepted repository behavior
+> as authoritative and do not redo completed work.
 >
-> Work directly in the current checkout without subagents. Use a light workflow: make a short plan, implement the foundation, run focused tests, update the user guide and relevant planning documentation, review the finished foundation once, and commit the completed checkpoint. Do not create repeated review/fix loops unless a concrete failure requires one.
+> Freeze a five-part implementation specification containing the objective, exact file
+> ownership, interfaces, constraints, and concrete verification evidence. Use Luna for
+> routine bounded implementation. Use Terra only when migration, transaction,
+> concurrency, security, or recovery correctness requires judgment the specification
+> cannot adequately encode.
 >
-> Preserve the planning package's requirements for immutable imported sources, stable IDs, artifact versions and approval, history/comparison/restore, transactional writes, recoverable persistence, and portable project archives. Keep the application fully usable without an AI provider.
+> Preserve immutable source, autosaved working drafts, stable IDs, accepted manuscript
+> versions, exact base-version checks, transactional candidate application, and local
+> restart/reopen behavior. Chat discussion must not mutate artifacts. Failed,
+> cancelled, interrupted, malformed, rejected, or stale AI output must not modify
+> accepted state.
 >
-> Use only deterministic offline fixtures and fake providers during development. Do not make paid or live OpenRouter requests. Ask before any major product tradeoff, destructive action, public publishing action, or external authorization. If interrupted or nearing a limit, commit any coherent completed slice and add a concise continuation note with completed work, remaining work, verification status, and the next concrete step.
+> Use deterministic offline fixtures and fake providers. Make no live or paid provider
+> call. Do not copy Story-to-CYOA graph, passage, choice, runtime, prompt, or Twine
+> domain code. Do not begin the next checkpoint.
+>
+> After implementation, inspect the actual diff and rerun lint, typecheck, tests,
+> production build, and the relevant browser workflow in the primary session. Obtain
+> a fresh Sol review before acceptance. The primary session commits only after a
+> `ship` verdict. Do not push or publish unless separately authorized.
 
-## Later-foundation prompt template
+## Checkpoint scope block
 
-> Implement Foundation `<N>` of Story Creator from the committed roadmap. Work directly in the current checkout without subagents.
->
-> First inspect the repository, all planning documents relevant to this foundation, the prior foundation's acceptance evidence, and any continuation note. Do not redo completed work. Tell me the current state before changing anything.
->
-> Implement the foundation completely, run focused offline tests, update the user guide and relevant planning documentation, review the finished foundation once, and commit it as a separate checkpoint. Do not begin the next foundation in this task.
->
-> Preserve existing behavior and the product contracts for immutable sources, stable-ID operations, approval and version history, transactional proposal application, bounded context, privacy, resumable jobs, checkpoints, and recovery. Interrupted, malformed, cancelled, or stale AI responses must not mutate canonical artifacts.
->
-> Use deterministic offline fake providers and make no paid or live OpenRouter requests. Ask before a major product tradeoff, destructive action, or required external authorization. If interrupted or nearing a limit, commit any coherent completed slice and leave a concise continuation note in the repository.
+Append this completed block to the request:
 
-## Continuation note template
+```text
+CHECKPOINT
+<ID and exact title>
 
-Use `docs/continuation.md` only when a checkpoint cannot be completed in one task. Remove it after the next task has incorporated the note and completed the checkpoint.
+OBJECTIVE
+<Observable outcome.>
+
+IN SCOPE
+- <Copied from the detailed plan.>
+
+OUT OF SCOPE
+- <Copied from the detailed plan.>
+- All later checkpoints.
+
+SETTLED CONTRACTS
+- <Only the source, autosave, version, provider, chat, or candidate contracts that
+  apply to this checkpoint.>
+
+VERIFICATION
+- pnpm lint
+- pnpm typecheck
+- pnpm test
+- pnpm build
+- pnpm test:e2e when API, persistence, navigation, or visible workflow changes
+- <Checkpoint-specific regression and rollback evidence.>
+```
+
+## Continuation note
+
+Use `docs/continuation.md` only when a checkpoint cannot be completed in one task.
+Remove it once the next task has incorporated the note and completed the checkpoint.
 
 ```markdown
-# Continuation: Foundation N
+# Continuation: checkpoint <ID>
 
 ## Completed
 
@@ -60,7 +97,7 @@ Use `docs/continuation.md` only when a checkpoint cannot be completed in one tas
 ## Repository state
 
 - Branch: ...
-- Latest coherent commit: ...
+- Latest accepted commit: ...
 - Intentional uncommitted files: ...
 
 ## Next concrete step
@@ -68,21 +105,28 @@ Use `docs/continuation.md` only when a checkpoint cannot be completed in one tas
 ...
 ```
 
-## Settled requirements to preserve
+## Milestone 1 requirements to preserve
 
-- The product supports premise-first creation, import-and-mend, and import-and-continue.
-- A user may provide only a premise and ask AI to suggest the complete first planning pass.
-- The guided workflow remains visible and canonical even when chat is used frequently.
-- Chat is a persistent assistant, not a separate source of truth.
-- Scope is always visible and manually adjustable.
-- Discussion cannot mutate artifacts; changes arrive as structured proposals for review.
-- Large proposals use summaries, grouped diffs, dependency-aware selective acceptance, and one transactional apply.
-- Imported source text remains immutable and available as evidence.
-- AI work is bounded, resumable, checkpointed, and safe under malformed or interrupted output.
-- Provider activity may be visible in a bounded scrollable component; raw private reasoning is withheld and is not persistent assistant memory.
-- The application is local-first and exportable. Provider credentials are encrypted and excluded from projects, exports, logs, and prompts.
-- Engineering and automated verification do not require paid OpenRouter calls.
+- Imported source is immutable and remains available for evidence and comparison.
+- Mending changes a separate working manuscript.
+- Manuscript, Bible, Flow, chat, and workspace state autosave locally.
+- Autosave drafts are distinct from immutable accepted versions.
+- AI change actions flush pending saves, materialize exact input checkpoints, and abort
+  before provider execution when saving fails.
+- The initial Bible and Flow use structured whole-document versions with stable IDs
+  inside them.
+- One persistent, visibly scoped conversation is sufficient for Milestone 1.
+- Discussion and suggestions cannot mutate project artifacts.
+- Mend and continue results remain candidates until explicitly accepted.
+- Candidate application verifies exact bases and commits transactionally.
+- Continue produces one reviewed next unit at a time.
+- Continuation acceptance and restore keep active manuscript order and the Flow
+  boundary consistent in one transaction while retaining immutable history.
+- Automated verification requires no provider key, internet access, or paid request.
+- Premise-first planning, generalized jobs, entity-level histories, archives, advanced
+  review, additional import formats, and long-form production queues remain later work.
 
-## Suggested first conversation in the new repository
+## Next checkpoint
 
-After the planning package is committed, use the initial implementation prompt above. Avoid asking for multiple foundations at once until the core domain and persistence behavior have passed Foundation 1's acceptance gate; those contracts constrain every later AI and editing workflow.
+Begin with M1-A, stabilization of the local core. Do not begin source import until
+M1-A has passed primary verification, fresh Sol review, and commit.
