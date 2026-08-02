@@ -50,3 +50,7 @@ The initial release does not need choice graphs, stats, relationship mechanics, 
 ## Recommended first implementation
 
 Implement only Foundation 1 from the roadmap after moving this package. Do not begin by calling a live model. Establish the project, source, manuscript, artifact, version, workflow, and local import contracts with offline tests first.
+
+## Checkpoint 1A implementation quickstart
+
+The initial local foundation is implemented as a private pnpm workspace (`@story-creator/domain`, `@story-creator/persistence`, `@story-creator/server`, and `@story-creator/web`). Run `pnpm install`, then `pnpm dev` for the local browser shell. Use `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `pnpm test:e2e` to verify the checkpoint. The default SQLite file is `data/story-creator.sqlite`; see [docs/user-guide.md](docs/user-guide.md) for the three project modes and restart/reopen behavior. Later planning features remain intentionally out of scope for this checkpoint.

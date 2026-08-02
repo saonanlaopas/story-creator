@@ -1,0 +1,14 @@
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
