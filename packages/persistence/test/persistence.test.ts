@@ -1,5 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import type * as Sqlite from "node:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +16,11 @@ function temporaryDirectory(): string {
 }
 
 const migration001FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-001.sqlite");
+const migration001Path = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "001_initial.sql");
+
+function fileHash(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
 
 describe("SQLite persistence", () => {
   it("creates all three modes and orders projects deterministically", () => {
@@ -97,18 +103,48 @@ describe("SQLite persistence", () => {
 });
 
 describe("numbered migrations", () => {
-  it("opens the frozen migration-001 compatibility fixture", () => {
-    const database = openDatabase(migration001FixturePath);
+  it("migrates a temporary fixture copy without changing the frozen fixture", () => {
+    const originalHash = fileHash(migration001FixturePath);
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "migration-001.sqlite");
+    const migrationDirectory = join(directory, "migrations");
+    mkdirSync(migrationDirectory);
+    copyFileSync(migration001FixturePath, databasePath);
+    copyFileSync(migration001Path, join(migrationDirectory, "001_initial.sql"));
+    writeFileSync(
+      join(migrationDirectory, "002_fixture_probe.sql"),
+      "CREATE TABLE migration_002_probe (id INTEGER PRIMARY KEY NOT NULL, note TEXT NOT NULL);"
+    );
+
     try {
-      expect(database.prepare("SELECT version, name FROM schema_migrations").all()).toEqual([
-        { version: 1, name: "initial" }
-      ]);
-      expect(new ProjectRepository(database).get("00000000-0000-4000-8000-000000000001")).toMatchObject({
-        name: "Frozen migration fixture",
-        entryMode: "import-mend"
-      });
+      const database = openDatabase(databasePath, { migrationDirectory });
+      try {
+        expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "fixture_probe" }
+        ]);
+        expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'migration_002_probe'").get()).toEqual({
+          name: "migration_002_probe"
+        });
+        expect(new ProjectRepository(database).get("00000000-0000-4000-8000-000000000001")).toMatchObject({
+          name: "Frozen migration fixture",
+          entryMode: "import-mend"
+        });
+      } finally {
+        database.close();
+      }
+
+      const originalDatabase = new DatabaseSync(migration001FixturePath, { readOnly: true });
+      try {
+        expect(originalDatabase.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" }
+        ]);
+      } finally {
+        originalDatabase.close();
+      }
     } finally {
-      database.close();
+      rmSync(directory, { recursive: true, force: true });
+      expect(fileHash(migration001FixturePath)).toBe(originalHash);
     }
   });
 
