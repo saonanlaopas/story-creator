@@ -9,6 +9,8 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+!packages/persistence/test/fixtures/
+!packages/persistence/test/fixtures/*.sqlite
 .env
 .env.*
 !.env.example
