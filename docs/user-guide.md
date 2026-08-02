@@ -4,7 +4,7 @@ Story Creator is a local-first shell for creating and reopening story projects. 
 
 ## Setup
 
-Install Node.js 22 or newer (the implementation uses Node's built-in `node:sqlite`) and pnpm. From this directory run:
+Install Node.js 22.x (the implementation uses Node's built-in `node:sqlite`) and pnpm 11.9.0. The supported Node major is recorded in `.node-version`. From this directory run:
 
 ```text
 pnpm install

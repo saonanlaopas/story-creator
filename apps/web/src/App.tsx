@@ -1,27 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { CreateProjectInput, ProjectEntryMode, ProjectRecord } from "@story-creator/domain";
-
-const modes: Array<{ value: ProjectEntryMode; label: string; description: string }> = [
-  { value: "premise", label: "Start from a premise", description: "Begin with a new idea and build the story foundation." },
-  { value: "import-mend", label: "Import and mend", description: "Bring in existing work and plan focused repairs later." },
-  { value: "import-continue", label: "Import and continue", description: "Bring in existing work and continue from a clear boundary later." }
-];
-
-const selectedStorageKey = "story-creator:selected-project";
-
-async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, { headers: { "content-type": "application/json", ...(init?.headers ?? {}) }, ...init });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `Request failed (${response.status})`);
-  }
-  return (await response.json()) as T;
-}
-
-function modeLabel(entryMode: ProjectEntryMode): string {
-  return modes.find((mode) => mode.value === entryMode)?.label ?? entryMode;
-}
+import { request, selectedProjectStorageKey } from "./api.js";
+import { projectModeLabel, projectModes } from "./project-modes.js";
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -33,7 +14,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedId = selectedProject?.id;
-  const selectedSummary = useMemo(() => selectedProject && modeLabel(selectedProject.entryMode), [selectedProject]);
+  const selectedSummary = useMemo(() => selectedProject && projectModeLabel(selectedProject.entryMode), [selectedProject]);
 
   const loadProjects = async () => {
     setLoading(true);
@@ -41,7 +22,7 @@ export default function App() {
     try {
       const loaded = await request<ProjectRecord[]>("/api/projects");
       setProjects(loaded);
-      const storedId = window.localStorage.getItem(selectedStorageKey);
+      const storedId = window.localStorage.getItem(selectedProjectStorageKey);
       const storedProject = storedId ? loaded.find((project) => project.id === storedId) : undefined;
       if (storedProject) {
         setSelectedProject(storedProject);
@@ -63,7 +44,7 @@ export default function App() {
 
   const selectProject = (project: ProjectRecord) => {
     setSelectedProject(project);
-    window.localStorage.setItem(selectedStorageKey, project.id);
+    window.localStorage.setItem(selectedProjectStorageKey, project.id);
   };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
@@ -113,7 +94,7 @@ export default function App() {
             <fieldset>
               <legend>How would you like to begin?</legend>
               <div className="mode-grid">
-                {modes.map((mode) => (
+                {projectModes.map((mode) => (
                   <label className={`mode-card ${entryMode === mode.value ? "selected" : ""}`} key={mode.value}>
                     <input
                       type="radio"
@@ -147,7 +128,7 @@ export default function App() {
                 <li key={project.id} className={project.id === selectedId ? "active" : ""}>
                   <div>
                     <strong>{project.name}</strong>
-                    <small>{modeLabel(project.entryMode)}</small>
+                    <small>{projectModeLabel(project.entryMode)}</small>
                   </div>
                   <button className="secondary" type="button" onClick={() => selectProject(project)}>Open</button>
                 </li>
