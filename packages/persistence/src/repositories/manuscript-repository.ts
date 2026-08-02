@@ -89,7 +89,6 @@ interface CheckpointRow extends DraftRow {
   unit_source_segment_id: string | null;
   unit_current_version_id: string;
   unit_accepted_version_id: string | null;
-  unit_position: number;
   unit_created_at: string;
   version_id: string;
   version_number: number;
@@ -386,15 +385,14 @@ export class ManuscriptRepository {
         this.database
           .prepare(
             `INSERT INTO manuscript_units
-              (id, project_id, source_document_id, source_segment_id, position, current_version_id, accepted_version_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+              (id, project_id, source_document_id, source_segment_id, current_version_id, accepted_version_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
           )
           .run(
             row.unit.id,
             row.unit.projectId,
             row.unit.sourceDocumentId,
             row.unit.sourceSegmentId,
-            position,
             row.unit.currentVersionId,
             row.unit.acceptedVersionId,
             row.unit.createdAt
@@ -462,7 +460,7 @@ export class ManuscriptRepository {
           u.project_id AS unit_project_id,
           u.source_document_id AS unit_source_document_id,
           u.source_segment_id AS unit_source_segment_id,
-          u.position AS unit_position,
+          o.position AS unit_position,
           u.current_version_id AS unit_current_version_id,
           u.accepted_version_id AS unit_accepted_version_id,
           u.created_at AS unit_created_at,
@@ -605,7 +603,6 @@ export class ManuscriptRepository {
             u.source_segment_id AS unit_source_segment_id,
             u.current_version_id AS unit_current_version_id,
             u.accepted_version_id AS unit_accepted_version_id,
-            u.position AS unit_position,
             u.created_at AS unit_created_at,
             d.manuscript_unit_id,
             d.prose,

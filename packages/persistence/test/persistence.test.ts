@@ -624,6 +624,64 @@ describe("autosaved working manuscript", () => {
       database.close();
     }
   });
+
+  it("derives active positions only from manuscript order and retains inactive history", () => {
+    const database = openDatabase();
+    try {
+      const project = new ProjectRepository(database).create({ name: "Ordered manuscript", entryMode: "import-mend" }, {
+        id: "00000000-0000-4000-8000-000000000100"
+      });
+      const source = new SourceRepository(database).create(project.id, {
+        filename: "ordered.txt",
+        mediaType: "text/plain",
+        encoding: "utf-8",
+        text: "# First\nFirst prose\n# Second\nSecond prose"
+      });
+      const unitIds = [
+        "00000000-0000-4000-8000-000000000101",
+        "00000000-0000-4000-8000-000000000102"
+      ];
+      const versionIds = [
+        "00000000-0000-4000-8000-000000000103",
+        "00000000-0000-4000-8000-000000000104"
+      ];
+      const repository = new ManuscriptRepository(database);
+      const initial = repository.initialize(project.id, source.document.id, { unitIds, versionIds });
+      const firstUnit = initial.units[0];
+      const secondUnit = initial.units[1];
+      if (!firstUnit || !secondUnit) throw new Error("Expected two manuscript units");
+
+      const unitColumns = database.prepare("PRAGMA table_info(manuscript_units)").all() as Array<{ name: string }>;
+      expect(unitColumns.some((column) => column.name === "position")).toBe(false);
+
+      database.prepare("DELETE FROM manuscript_unit_order WHERE project_id = ?").run(project.id);
+      database.prepare("INSERT INTO manuscript_unit_order (project_id, position, manuscript_unit_id) VALUES (?, ?, ?)").run(project.id, 0, secondUnit.unit.id);
+      database.prepare("INSERT INTO manuscript_unit_order (project_id, position, manuscript_unit_id) VALUES (?, ?, ?)").run(project.id, 1, firstUnit.unit.id);
+      const reordered = repository.get(project.id);
+      expect(reordered?.units.map((unit) => ({ id: unit.unit.id, position: unit.unit.position }))).toEqual([
+        { id: secondUnit.unit.id, position: 0 },
+        { id: firstUnit.unit.id, position: 1 }
+      ]);
+
+      database.prepare("DELETE FROM manuscript_unit_order WHERE project_id = ?").run(project.id);
+      database.prepare("INSERT INTO manuscript_unit_order (project_id, position, manuscript_unit_id) VALUES (?, ?, ?)").run(project.id, 0, firstUnit.unit.id);
+      database.prepare("INSERT INTO manuscript_unit_order (project_id, position, manuscript_unit_id) VALUES (?, ?, ?)").run(project.id, 1, secondUnit.unit.id);
+      database.prepare("DELETE FROM manuscript_unit_order WHERE project_id = ? AND manuscript_unit_id = ?").run(project.id, firstUnit.unit.id);
+      database.prepare("DELETE FROM manuscript_unit_order WHERE project_id = ? AND manuscript_unit_id = ?").run(project.id, secondUnit.unit.id);
+      database.prepare("INSERT INTO manuscript_unit_order (project_id, position, manuscript_unit_id) VALUES (?, ?, ?)").run(project.id, 0, secondUnit.unit.id);
+
+      const active = repository.get(project.id);
+      expect(active?.structure.activeUnitIds).toEqual([secondUnit.unit.id]);
+      expect(active?.units.map((unit) => ({ id: unit.unit.id, position: unit.unit.position }))).toEqual([
+        { id: secondUnit.unit.id, position: 0 }
+      ]);
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_units WHERE id = ?").get(firstUnit.unit.id)).toEqual({ count: 1 });
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_unit_versions WHERE id = ? AND manuscript_unit_id = ?").get(firstUnit.currentVersion.id, firstUnit.unit.id)).toEqual({ count: 1 });
+      expect(database.prepare("SELECT count(*) AS count FROM manuscript_drafts WHERE manuscript_unit_id = ?").get(firstUnit.unit.id)).toEqual({ count: 1 });
+    } finally {
+      database.close();
+    }
+  });
 });
 
 describe("numbered migrations", () => {

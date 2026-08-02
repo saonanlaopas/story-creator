@@ -6,14 +6,12 @@ CREATE TABLE manuscript_units (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   source_document_id TEXT,
   source_segment_id TEXT,
-  position INTEGER NOT NULL CHECK (position >= 0),
   current_version_id TEXT NOT NULL,
   accepted_version_id TEXT,
   created_at TEXT NOT NULL,
   CHECK ((source_document_id IS NULL) = (source_segment_id IS NULL)),
   UNIQUE (project_id, id),
   UNIQUE (id, source_document_id),
-  UNIQUE (project_id, position),
   UNIQUE (source_document_id, source_segment_id),
   FOREIGN KEY (source_document_id, project_id)
     REFERENCES source_documents(id, project_id) ON DELETE CASCADE,
@@ -76,7 +74,7 @@ CREATE TABLE manuscript_unit_order (
     REFERENCES manuscript_units(project_id, id) ON DELETE CASCADE
 );
 
-CREATE INDEX manuscript_units_project_idx ON manuscript_units (project_id, position ASC);
+CREATE INDEX manuscript_units_project_idx ON manuscript_units (project_id);
 CREATE INDEX manuscript_versions_unit_idx ON manuscript_unit_versions (manuscript_unit_id, version_number DESC);
 CREATE INDEX manuscript_drafts_updated_idx ON manuscript_drafts (updated_at DESC, manuscript_unit_id ASC);
 

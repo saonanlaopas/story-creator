@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import type { CreateProjectInput, ProjectEntryMode, ProjectRecord, SourceInspection, SourceMediaType } from "@story-creator/domain";
 import { request, selectedProjectStorageKey, selectedSourceSegmentStorageKey } from "./api.js";
@@ -24,6 +24,7 @@ export default function App() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceFileBlocked, setSourceFileBlocked] = useState(false);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const manuscriptFlushRef = useRef<() => Promise<boolean>>(async () => true);
 
   const selectedId = selectedProject?.id;
   const selectedSummary = useMemo(() => selectedProject && projectModeLabel(selectedProject.entryMode), [selectedProject]);
@@ -87,9 +88,24 @@ export default function App() {
     };
   }, [selectedId]);
 
-  const selectProject = (project: ProjectRecord) => {
+  const registerManuscriptNavigationGuard = useCallback((flush: () => Promise<boolean>) => {
+    manuscriptFlushRef.current = flush;
+    return () => {
+      if (manuscriptFlushRef.current === flush) manuscriptFlushRef.current = async () => true;
+    };
+  }, []);
+
+  const selectProject = async (project: ProjectRecord): Promise<boolean> => {
+    if (project.id === selectedId) return true;
+    try {
+      if (!(await manuscriptFlushRef.current())) return false;
+    } catch (navigationError) {
+      setError(navigationError instanceof Error ? navigationError.message : "Could not save the current manuscript before navigation");
+      return false;
+    }
     setSelectedProject(project);
     window.localStorage.setItem(selectedProjectStorageKey, project.id);
+    return true;
   };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
@@ -104,7 +120,7 @@ export default function App() {
       });
       setName("");
       setProjects((current) => [created, ...current]);
-      selectProject(created);
+      await selectProject(created);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not create project");
     } finally {
@@ -244,7 +260,7 @@ export default function App() {
                     <strong>{project.name}</strong>
                     <small>{projectModeLabel(project.entryMode)}</small>
                   </div>
-                  <button className="secondary" type="button" onClick={() => selectProject(project)}>Open</button>
+                  <button className="secondary" type="button" onClick={() => void selectProject(project)}>Open</button>
                 </li>
               ))}
             </ul>
@@ -284,7 +300,12 @@ export default function App() {
         onSelectSegment={selectSourceSegment}
       />
 
-      <ManuscriptPanel key={selectedProject?.id ?? "no-project"} project={selectedProject} source={selectedSource} />
+      <ManuscriptPanel
+        key={selectedProject?.id ?? "no-project"}
+        project={selectedProject}
+        source={selectedSource}
+        onRegisterNavigationGuard={registerManuscriptNavigationGuard}
+      />
     </main>
   );
 }

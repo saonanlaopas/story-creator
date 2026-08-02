@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import type { ManuscriptView, ProjectRecord, SourceInspection } from "@story-creator/domain";
+import { manuscriptDraftSchema, type ManuscriptDraft, type ManuscriptView, type ProjectRecord, type SourceInspection } from "@story-creator/domain";
 import {
   checkpointManuscriptUnit,
   initializeManuscript,
   loadManuscript,
   saveManuscriptDraft
 } from "./manuscript-api.js";
-import { selectedManuscriptUnitStorageKey } from "./api.js";
+import { ApiRequestError, selectedManuscriptUnitStorageKey } from "./api.js";
 
 type SaveState = "saved" | "saving" | "failed";
 
 export interface ManuscriptPanelProps {
   project: ProjectRecord | null;
   source: SourceInspection | null;
+  onRegisterNavigationGuard?: (flush: () => Promise<boolean>) => () => void;
 }
 
 interface PendingSave {
@@ -20,11 +21,22 @@ interface PendingSave {
   prose: string;
 }
 
+interface DraftConflict {
+  unitId: string;
+  currentDraft: ManuscriptDraft;
+}
+
+function conflictDraftFromError(error: unknown): ManuscriptDraft | null {
+  if (!(error instanceof ApiRequestError) || error.body.code !== "DRAFT_REVISION_CONFLICT") return null;
+  const parsed = manuscriptDraftSchema.safeParse(error.body.currentDraft);
+  return parsed.success ? parsed.data : null;
+}
+
 function selectedUnit(manuscript: ManuscriptView | null, unitId: string | null) {
   return manuscript?.units.find((unit) => unit.unit.id === unitId) ?? manuscript?.units[0];
 }
 
-export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
+export function ManuscriptPanel({ project, source, onRegisterNavigationGuard }: ManuscriptPanelProps) {
   const projectId = project?.id;
   const [manuscript, setManuscript] = useState<ManuscriptView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,6 +48,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
   const [checkpointing, setCheckpointing] = useState(false);
   const [checkpointMessage, setCheckpointMessage] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [draftConflict, setDraftConflict] = useState<DraftConflict | null>(null);
   const manuscriptRef = useRef<ManuscriptView | null>(null);
   const selectedUnitIdRef = useRef<string | null>(null);
   const draftTextRef = useRef("");
@@ -48,6 +61,15 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
   const updateManuscript = (next: ManuscriptView | null) => {
     manuscriptRef.current = next;
     setManuscript(next);
+  };
+
+  const updatePersistedDraft = (unitId: string, draft: ManuscriptDraft) => {
+    const current = manuscriptRef.current;
+    if (!current) return;
+    updateManuscript({
+      ...current,
+      units: current.units.map((candidate) => candidate.unit.id === unitId ? { ...candidate, draft } : candidate)
+    });
   };
 
   const updateSelectedUnit = (unitId: string | null, nextManuscript: ManuscriptView | null = manuscriptRef.current) => {
@@ -66,6 +88,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
       setLoading(false);
       setError(null);
       setCheckpointMessage(null);
+      setDraftConflict(null);
       return;
     }
 
@@ -87,6 +110,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
         const nextUnitId = firstUnit?.unit.id ?? null;
         updateSelectedUnit(nextUnitId, loaded);
         setSaveState("saved");
+        setDraftConflict(null);
       })
       .catch((loadError) => {
         if (!active) return;
@@ -139,6 +163,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
       });
       updateManuscript(result.manuscript);
       setError(null);
+      setDraftConflict(null);
       if (pendingSaveRef.current) {
         setSaveState("saving");
         scheduleSave(0);
@@ -151,8 +176,16 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
         unitId: pending.unitId,
         prose: draftTextRef.current
       };
+      const currentDraft = conflictDraftFromError(saveError);
+      if (currentDraft?.manuscriptUnitId === pending.unitId) {
+        updatePersistedDraft(pending.unitId, currentDraft);
+        setDraftConflict({ unitId: pending.unitId, currentDraft });
+        setError(null);
+      } else {
+        setDraftConflict(null);
+        setError(saveError instanceof Error ? saveError.message : "Could not save the manuscript draft");
+      }
       setSaveState("failed");
-      setError(saveError instanceof Error ? saveError.message : "Could not save the manuscript draft");
       return false;
     }
   };
@@ -192,6 +225,12 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
   flushRef.current = flushPendingSave;
 
   useEffect(() => {
+    if (!onRegisterNavigationGuard) return;
+    const guard = () => flushRef.current();
+    return onRegisterNavigationGuard(guard);
+  }, [onRegisterNavigationGuard]);
+
+  useEffect(() => {
     const handlePageHide = () => {
       void flushRef.current();
     };
@@ -226,6 +265,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
     draftTextRef.current = prose;
     setDraftText(prose);
     setSaveState("saved");
+    setDraftConflict(null);
     setCheckpointMessage(null);
     setCheckpointError(null);
   };
@@ -241,6 +281,7 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
       updateSelectedUnit(firstUnitId, created);
       if (firstUnitId) window.localStorage.setItem(selectedManuscriptUnitStorageKey(projectId), firstUnitId);
       setSaveState("saved");
+      setDraftConflict(null);
     } catch (initializeError) {
       setError(initializeError instanceof Error ? initializeError.message : "Could not create the working manuscript");
     } finally {
@@ -251,6 +292,21 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
   const handleRetry = () => {
     setError(null);
     void flushPendingSave();
+  };
+
+  const handleLoadPersistedDraft = () => {
+    if (!draftConflict) return;
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    pendingSaveRef.current = null;
+    draftTextRef.current = draftConflict.currentDraft.prose;
+    setDraftText(draftConflict.currentDraft.prose);
+    updatePersistedDraft(draftConflict.unitId, draftConflict.currentDraft);
+    setDraftConflict(null);
+    setError(null);
+    setSaveState("saved");
   };
 
   const handleCheckpoint = async () => {
@@ -305,6 +361,18 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
           </div>
           {error && <p className="notice error" role="alert">{error}</p>}
           {checkpointError && <p className="notice error" role="alert">{checkpointError}</p>}
+          {draftConflict && (
+            <div className="notice warning" role="alert" data-testid="manuscript-conflict">
+              <strong>Draft conflict</strong>
+              <p>
+                Another save advanced the persisted draft to revision {draftConflict.currentDraft.revision}. Your local prose is still visible.
+                Save local version will retry it against the current revision.
+              </p>
+              <button className="secondary" type="button" onClick={handleLoadPersistedDraft}>
+                Load persisted draft (discard local text)
+              </button>
+            </div>
+          )}
           {checkpointMessage && <p className="notice success" role="status" data-testid="checkpoint-result">{checkpointMessage}</p>}
           <div className="manuscript-reader-grid">
             <nav aria-label="Manuscript outline">
@@ -347,7 +415,9 @@ export function ManuscriptPanel({ project, source }: ManuscriptPanelProps) {
                     rows={14}
                   />
                   {saveState === "failed" && (
-                    <button className="secondary retry-button" type="button" onClick={handleRetry}>Retry save</button>
+                    <button className="secondary retry-button" type="button" onClick={handleRetry}>
+                      {draftConflict ? "Save local version" : "Retry save"}
+                    </button>
                   )}
 
                   <section className="source-comparison" aria-labelledby="manuscript-source-heading">
