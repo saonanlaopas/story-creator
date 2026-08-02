@@ -1,9 +1,13 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { StoryProvider } from "./providers/provider.js";
 
 export interface BuildAppOptions {
   databasePath?: string;
+  environment?: NodeJS.ProcessEnv;
   logger?: boolean;
+  providerRunTimeoutMs?: number;
+  providers?: StoryProvider[];
   webDistPath?: string;
 }
 

@@ -25,6 +25,7 @@ function temporaryDirectory(): string {
 
 const migration001FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-001.sqlite");
 const migration002FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-002.sqlite");
+const migration003FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-003.sqlite");
 const migration001Path = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "001_initial.sql");
 
 function fileHash(path: string): string {
@@ -740,13 +741,17 @@ describe("numbered migrations", () => {
         expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
           { version: 1, name: "initial" },
           { version: 2, name: "source_import" },
-          { version: 3, name: "manuscript" }
+          { version: 3, name: "manuscript" },
+          { version: 4, name: "provider_runs" }
         ]);
         expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_documents'").get()).toEqual({
           name: "source_documents"
         });
         expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manuscript_units'").get()).toEqual({
           name: "manuscript_units"
+        });
+        expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provider_runs'").get()).toEqual({
+          name: "provider_runs"
         });
       } finally {
         database.close();
@@ -779,7 +784,8 @@ describe("numbered migrations", () => {
         expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
           { version: 1, name: "initial" },
           { version: 2, name: "source_import" },
-          { version: 3, name: "manuscript" }
+          { version: 3, name: "manuscript" },
+          { version: 4, name: "provider_runs" }
         ]);
         expect(database.prepare("SELECT * FROM source_documents ORDER BY id").all()).toEqual(sourceDocumentsBefore);
         expect(database.prepare("SELECT * FROM source_segmentations ORDER BY id").all()).toEqual(sourceSegmentationsBefore);
@@ -793,6 +799,45 @@ describe("numbered migrations", () => {
     }
   });
 
+  it("migrates the frozen M1-B2 fixture and preserves manuscript drafts and versions", () => {
+    const originalHash = fileHash(migration003FixturePath);
+    const originalDatabase = new DatabaseSync(migration003FixturePath, { readOnly: true });
+    const projectBefore = originalDatabase.prepare("SELECT * FROM projects ORDER BY id").all();
+    const structuresBefore = originalDatabase.prepare("SELECT * FROM manuscript_structures ORDER BY project_id").all();
+    const unitsBefore = originalDatabase.prepare("SELECT * FROM manuscript_units ORDER BY id").all();
+    const versionsBefore = originalDatabase.prepare("SELECT * FROM manuscript_unit_versions ORDER BY id").all();
+    const draftsBefore = originalDatabase.prepare("SELECT * FROM manuscript_drafts ORDER BY manuscript_unit_id").all();
+    const orderBefore = originalDatabase.prepare("SELECT * FROM manuscript_unit_order ORDER BY project_id, position").all();
+    originalDatabase.close();
+
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "migration-003.sqlite");
+    copyFileSync(migration003FixturePath, databasePath);
+    try {
+      const database = openDatabase(databasePath);
+      try {
+        expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "source_import" },
+          { version: 3, name: "manuscript" },
+          { version: 4, name: "provider_runs" }
+        ]);
+        expect(database.prepare("SELECT * FROM projects ORDER BY id").all()).toEqual(projectBefore);
+        expect(database.prepare("SELECT * FROM manuscript_structures ORDER BY project_id").all()).toEqual(structuresBefore);
+        expect(database.prepare("SELECT * FROM manuscript_units ORDER BY id").all()).toEqual(unitsBefore);
+        expect(database.prepare("SELECT * FROM manuscript_unit_versions ORDER BY id").all()).toEqual(versionsBefore);
+        expect(database.prepare("SELECT * FROM manuscript_drafts ORDER BY manuscript_unit_id").all()).toEqual(draftsBefore);
+        expect(database.prepare("SELECT * FROM manuscript_unit_order ORDER BY project_id, position").all()).toEqual(orderBefore);
+        expect(database.prepare("SELECT count(*) AS count FROM provider_runs").get()).toEqual({ count: 0 });
+      } finally {
+        database.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      expect(fileHash(migration003FixturePath)).toBe(originalHash);
+    }
+  });
+
   it("is idempotent and records exact checksums", () => {
     const database = openDatabase();
     try {
@@ -801,7 +846,12 @@ describe("numbered migrations", () => {
         name: string;
         checksum: string;
       }>;
-      expect(rows.map((row) => [row.version, row.name])).toEqual([[1, "initial"], [2, "source_import"], [3, "manuscript"]]);
+      expect(rows.map((row) => [row.version, row.name])).toEqual([
+        [1, "initial"],
+        [2, "source_import"],
+        [3, "manuscript"],
+        [4, "provider_runs"]
+      ]);
       expect(rows.every((row) => row.checksum.length === 64)).toBe(true);
       expect(() => readMigrations()).not.toThrow();
     } finally {

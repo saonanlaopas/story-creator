@@ -55,3 +55,31 @@ export type {
   SourceSegmentationDraft,
   SourceSegmentationVersion
 } from "./source.js";
+export {
+  createProviderRunInputSchema,
+  jsonValueSchema,
+  kernelProbeCandidateSchema,
+  parseCreateProviderRunInput,
+  providerRunCandidateSchema,
+  providerRunDetailSchema,
+  providerRunErrorSchema,
+  providerRunKinds,
+  providerRunSchema,
+  providerRunScopeSchema,
+  providerRunStatuses,
+  providerUsageSchema
+} from "./provider-run.js";
+export type {
+  CreateProviderRunInput,
+  JsonPrimitive,
+  JsonValue,
+  KernelProbeCandidate,
+  ProviderRun,
+  ProviderRunCandidate,
+  ProviderRunDetail,
+  ProviderRunError,
+  ProviderRunKind,
+  ProviderRunScope,
+  ProviderRunStatus,
+  ProviderUsage
+} from "./provider-run.js";

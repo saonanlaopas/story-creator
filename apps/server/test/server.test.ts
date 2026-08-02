@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/index.js";
+import { openDatabase, ProviderRunRepository } from "@story-creator/persistence";
 
 describe("server API", () => {
   it("serves health and project create/list/get routes", async () => {
@@ -283,6 +284,130 @@ describe("server API", () => {
       expect(reopened.json().units[0].sourceComparison.segment.text).toBe("# Restart chapter\nPersist this draft");
     } finally {
       await second.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a pending provider run and executes it only through an explicit action", async () => {
+    const app = await buildApp({ databasePath: ":memory:" });
+    try {
+      const projectResponse = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Provider API project", entryMode: "premise" }
+      });
+      const projectId = projectResponse.json().id as string;
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { title: "Explicit provider run" }
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json()).toMatchObject({ run: { status: "pending" }, candidate: null });
+      const runId = created.json().run.id as string;
+
+      const beforeExecution = await app.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(beforeExecution.json()).toMatchObject({ run: { status: "pending" }, candidate: null });
+
+      const executed = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(executed.statusCode).toBe(200);
+      expect(executed.json()).toMatchObject({
+        run: { status: "completed", provider: "fake", model: "fake-v1" },
+        candidate: { output: { schemaVersion: 1, echo: { title: "Explicit provider run" } } }
+      });
+
+      const listed = await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toHaveLength(1);
+      expect(JSON.stringify(listed.json())).not.toMatch(/OPENROUTER_API_KEY|sk-or-v1-/i);
+
+      const repeatedExecution = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(repeatedExecution.statusCode).toBe(409);
+      expect(repeatedExecution.json().code).toBe("PROVIDER_RUN_STATE_CONFLICT");
+
+      const credentialInput = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { apiKey: "sk-or-v1-do-not-store-this-key" }
+        }
+      });
+      expect(credentialInput.statusCode).toBe(400);
+      expect(credentialInput.json().error).toMatch(/credentials/i);
+      expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` })).json()).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("recovers a persisted running provider run when a new server starts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "story-creator-provider-server-"));
+    const databasePath = join(directory, "story.sqlite");
+    let projectId = "";
+    let runId = "";
+    const first = await buildApp({ databasePath });
+    try {
+      const project = await first.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Interrupted provider API", entryMode: "premise" }
+      });
+      projectId = project.json().id as string;
+      const run = await first.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { interrupted: true }
+        }
+      });
+      runId = run.json().run.id as string;
+    } finally {
+      await first.close();
+    }
+
+    const directDatabase = openDatabase(databasePath);
+    new ProviderRunRepository(directDatabase).markRunning(projectId, runId);
+    directDatabase.close();
+
+    const restarted = await buildApp({ databasePath });
+    try {
+      const recovered = await restarted.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(recovered.statusCode).toBe(200);
+      expect(recovered.json()).toMatchObject({
+        run: {
+          status: "failed",
+          error: { code: "PROVIDER_INTERRUPTED", retryable: true }
+        },
+        candidate: null
+      });
+    } finally {
+      await restarted.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });

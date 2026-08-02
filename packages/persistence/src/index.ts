@@ -21,3 +21,15 @@ export type {
   SaveManuscriptDraftOptions,
   SaveManuscriptDraftResult
 } from "./repositories/manuscript-repository.js";
+export {
+  canonicalJson,
+  jsonFingerprint,
+  ProviderRunNotFoundError,
+  ProviderRunRepository,
+  ProviderRunStateError
+} from "./repositories/provider-run-repository.js";
+export type {
+  CompleteProviderRunOptions,
+  CreateProviderRunOptions,
+  TransitionProviderRunOptions
+} from "./repositories/provider-run-repository.js";
