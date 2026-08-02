@@ -6,14 +6,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { kernelProbeExecutionPolicy } from "@story-creator/domain";
 import {
   DraftRevisionConflictError,
   ManuscriptRepository,
   openDatabase,
   ProjectRepository,
+  ProviderRunRepository,
   readMigrations,
   SourceRepository,
-  transaction
+  transaction,
+  canonicalJson
 } from "../src/index.js";
 
 const require = createRequire(import.meta.url);
@@ -26,6 +29,7 @@ function temporaryDirectory(): string {
 const migration001FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-001.sqlite");
 const migration002FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-002.sqlite");
 const migration003FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-003.sqlite");
+const migration004FixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "migration-004.sqlite");
 const migration001Path = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "001_initial.sql");
 
 function fileHash(path: string): string {
@@ -838,6 +842,119 @@ describe("numbered migrations", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
       expect(fileHash(migration003FixturePath)).toBe(originalHash);
+    }
+  });
+
+  it("migrates a frozen schema-004 provider-run fixture without changing its state", () => {
+    const originalHash = fileHash(migration004FixturePath);
+    const providerRunColumns = `id, project_id, kind, provider, model, status, scope_json, input_json,
+      input_fingerprint, attempt_number, retry_of_run_id, error_json, usage_json,
+      created_at, updated_at, started_at, finished_at`;
+    const originalDatabase = new DatabaseSync(migration004FixturePath, { readOnly: true });
+    const originalMigrations = originalDatabase
+      .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
+      .all();
+    const projectBefore = originalDatabase.prepare("SELECT * FROM projects ORDER BY id").all();
+    const baseRunBefore = originalDatabase
+      .prepare(`SELECT ${providerRunColumns} FROM provider_runs WHERE id = ?`)
+      .get("00000000-0000-4000-8000-000000000401");
+    const retryRunBefore = originalDatabase
+      .prepare(`SELECT ${providerRunColumns} FROM provider_runs WHERE id = ?`)
+      .get("00000000-0000-4000-8000-000000000403");
+    const candidateBefore = originalDatabase
+      .prepare("SELECT id, provider_run_id, output_json, output_fingerprint, created_at FROM provider_run_candidates WHERE id = ?")
+      .get("00000000-0000-4000-8000-000000000402");
+    originalDatabase.close();
+
+    expect(originalMigrations).toEqual([
+      { version: 1, name: "initial" },
+      { version: 2, name: "source_import" },
+      { version: 3, name: "manuscript" },
+      { version: 4, name: "provider_runs" }
+    ]);
+    expect(baseRunBefore).toBeDefined();
+    expect(retryRunBefore).toBeDefined();
+    expect(candidateBefore).toBeDefined();
+
+    const baseRun = baseRunBefore as Record<string, unknown>;
+    const projectId = baseRun.project_id as string;
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "migration-004.sqlite");
+    copyFileSync(migration004FixturePath, databasePath);
+    try {
+      const database = openDatabase(databasePath);
+      try {
+        expect(database.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "source_import" },
+          { version: 3, name: "manuscript" },
+          { version: 4, name: "provider_runs" },
+          { version: 5, name: "provider_run_policies" }
+        ]);
+        expect(database.prepare("SELECT * FROM projects ORDER BY id").all()).toEqual(projectBefore);
+        expect(database
+          .prepare(`SELECT ${providerRunColumns} FROM provider_runs WHERE id = ?`)
+          .get(baseRun.id)).toEqual(baseRunBefore);
+        expect(database
+          .prepare(`SELECT ${providerRunColumns} FROM provider_runs WHERE id = ?`)
+          .get("00000000-0000-4000-8000-000000000403")).toEqual(retryRunBefore);
+        expect(database
+          .prepare("SELECT id, provider_run_id, output_json, output_fingerprint, created_at FROM provider_run_candidates WHERE id = ?")
+          .get("00000000-0000-4000-8000-000000000402")).toEqual(candidateBefore);
+
+        const policyRow = database
+          .prepare("SELECT execution_policy_json FROM provider_runs WHERE id = ?")
+          .get(baseRun.id) as { execution_policy_json: string };
+        expect(policyRow.execution_policy_json).toBe(canonicalJson(kernelProbeExecutionPolicy));
+        expect(JSON.parse(policyRow.execution_policy_json) as unknown).toEqual({
+          version: "kernel-probe-execution-v1",
+          maxCanonicalInputBytes: 4096,
+          maxOutputTokens: 256,
+          maxCanonicalValidatedOutputBytes: 8192,
+          timeoutMs: 30000
+        });
+
+        const migratedRun = new ProviderRunRepository(database).get(projectId, baseRun.id);
+        expect(migratedRun).toMatchObject({
+          run: {
+            id: baseRun.id,
+            projectId,
+            kind: "kernel-probe",
+            provider: "fixture-provider",
+            model: "fixture-model-v1",
+            status: "completed",
+            attemptNumber: 1,
+            retryOfRunId: null,
+            executionPolicy: kernelProbeExecutionPolicy
+          },
+          candidate: {
+            id: "00000000-0000-4000-8000-000000000402",
+            providerRunId: baseRun.id,
+            outputFingerprint: (candidateBefore as Record<string, unknown>).output_fingerprint
+          }
+        });
+        expect(migratedRun?.run.inputFingerprint).toBe(baseRun.input_fingerprint);
+        expect(migratedRun?.candidate?.output).toEqual({
+          echo: { prompt: "frozen-migration-004" },
+          schemaVersion: 1
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      const originalAfter = new DatabaseSync(migration004FixturePath, { readOnly: true });
+      try {
+        expect(originalAfter.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
+          { version: 1, name: "initial" },
+          { version: 2, name: "source_import" },
+          { version: 3, name: "manuscript" },
+          { version: 4, name: "provider_runs" }
+        ]);
+      } finally {
+        originalAfter.close();
+      }
+      expect(fileHash(migration004FixturePath)).toBe(originalHash);
     }
   });
 
