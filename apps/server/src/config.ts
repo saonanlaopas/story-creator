@@ -1,9 +1,14 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { FastifyServerOptions } from "fastify";
+import type { StoryProvider } from "./providers/provider.js";
 
 export interface BuildAppOptions {
   databasePath?: string;
-  logger?: boolean;
+  environment?: NodeJS.ProcessEnv;
+  logger?: FastifyServerOptions["logger"];
+  providerRunTimeoutMs?: number;
+  providers?: StoryProvider[];
   webDistPath?: string;
 }
 

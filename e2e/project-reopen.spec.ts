@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -15,10 +16,10 @@ interface ReadyMessage {
   port: number;
 }
 
-function startServer(databasePath: string): Promise<RunningServer> {
+function startServer(databasePath: string, port = 0): Promise<RunningServer> {
   const launcherPath = join(process.cwd(), "e2e", "server-child.mjs");
   const child = spawn(process.execPath, [launcherPath], {
-    env: { ...process.env, STORY_CREATOR_DATABASE_PATH: databasePath },
+    env: { ...process.env, STORY_CREATOR_DATABASE_PATH: databasePath, STORY_CREATOR_E2E_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -97,6 +98,22 @@ function startServer(databasePath: string): Promise<RunningServer> {
   });
 }
 
+function findAvailablePort(): Promise<number> {
+  const probe = createNetServer();
+  return new Promise<number>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = probe.address();
+      if (!address || typeof address === "string") {
+        probe.close();
+        reject(new Error("Could not reserve an available loopback port"));
+        return;
+      }
+      probe.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
 function isReadyMessage(value: unknown): value is ReadyMessage {
   if (!value || typeof value !== "object") return false;
   const message = value as Record<string, unknown>;
@@ -158,6 +175,480 @@ test("creates, restarts, and reopens a saved project", async ({ page }) => {
     await expect(page.getByText("Ready to reopen", { exact: true })).toBeVisible();
   } finally {
     if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("imports, inspects, restarts, and reopens an immutable source outline", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-source-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  try {
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Browser source story");
+    await page.getByLabel("Import and mend").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
+
+    const markdownText = "# Chapter One\nOpening \u2014 \u65e5\u672c\u8a9e \u{1F642}\n## Arrival\nA ship arrives.";
+    await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles({
+      name: "browser-story.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from(markdownText, "utf8")
+    });
+    await expect(page.getByLabel("Paste source text")).toHaveValue(markdownText);
+    await page.getByRole("button", { name: "Import source" }).click();
+    await expect(page.getByRole("heading", { name: "browser-story.md" })).toBeVisible();
+    await expect(page.getByTestId("normalized-source")).toContainText("A ship arrives.");
+    await page.getByRole("button", { name: /Arrival/ }).click();
+    await expect(page.getByTestId("selected-source-segment")).toContainText("A ship arrives.");
+
+    await stopServer(server.child);
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await expect(page.getByRole("heading", { name: "Browser source story" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "browser-story.md" })).toBeVisible();
+    await expect(page.getByTestId("selected-source-segment")).toContainText("A ship arrives.");
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid source files without creating source rows", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-invalid-source-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  let server: RunningServer | undefined;
+  let projectId = "";
+  let sourcePostCount = 0;
+  try {
+    server = await startServer(databasePath);
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "POST" && /\/api\/projects\/[^/]+\/sources$/.test(pathname)) {
+        sourcePostCount += 1;
+      }
+    });
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Invalid source story");
+    const projectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    projectId = (await (await projectResponsePromise).json()).id as string;
+    await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
+
+    const invalidFiles = [
+      {
+        name: "story.pdf",
+        mimeType: "application/pdf",
+        buffer: Buffer.from("not a supported source", "utf8"),
+        message: /unsupported source file.*\.txt.*\.md.*\.markdown/i
+      },
+      {
+        name: "story.md",
+        mimeType: "text/plain",
+        buffer: Buffer.from("Markdown with an incompatible MIME", "utf8"),
+        message: /incompatible MIME/i
+      },
+      {
+        name: "story.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from([0xc3, 0x28]),
+        message: /invalid UTF-8.*save.*UTF-8/i
+      }
+    ];
+
+    for (const invalidFile of invalidFiles) {
+      await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles(invalidFile);
+      await expect(page.getByRole("alert")).toContainText(invalidFile.message);
+      await expect(page.getByLabel("Paste source text")).toHaveValue("");
+      await page.getByRole("button", { name: "Import source" }).click();
+      await expect(page.getByText("No source imported yet.", { exact: true })).toBeVisible();
+      const sources = await page.request.get(`${server.baseUrl}/api/projects/${projectId}/sources`);
+      expect(sources.ok()).toBeTruthy();
+      expect(await sources.json()).toEqual([]);
+    }
+
+    expect(sourcePostCount).toBe(0);
+
+    const validUnicodeText = "Caf\u00e9 \u2014 \u65e5\u672c\u8a9e \u{1F642}";
+    await page.getByLabel("UTF-8 TXT or Markdown file").setInputFiles({
+      name: "valid.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(validUnicodeText, "utf8")
+    });
+    await expect(page.getByLabel("Paste source text")).toHaveValue(validUnicodeText);
+    await page.getByRole("button", { name: "Import source" }).click();
+    await expect(page.getByTestId("normalized-source")).toContainText(validUnicodeText);
+    expect(sourcePostCount).toBe(1);
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("creates, autosaves, checkpoints, and reopens a working manuscript", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-manuscript-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  let failNextSave = false;
+  const manuscriptPanel = page.locator("section.manuscript-panel");
+  try {
+    server = await startServer(databasePath, port);
+    await page.route("**/api/projects/*/manuscript/units/*/draft", async (route) => {
+      if (!failNextSave) {
+        await route.continue();
+        return;
+      }
+      failNextSave = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Simulated draft save failure" })
+      });
+    });
+
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Browser manuscript story");
+    await page.getByLabel("Import and mend").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Story source" })).toBeVisible();
+
+    const sourceText = "# Chapter One\nOriginal first\n## Arrival\nOriginal second";
+    await page.getByLabel("Paste source text").fill(sourceText);
+    await page.getByRole("button", { name: "Import source" }).click();
+    await expect(page.getByRole("heading", { name: "Working manuscript" })).toBeVisible();
+
+    await manuscriptPanel.getByRole("button", { name: /Create working manuscript/ }).click();
+    await expect(manuscriptPanel.getByRole("button", { name: /Chapter One/ })).toBeVisible();
+    const secondUnit = manuscriptPanel.getByRole("button", { name: /Arrival/ });
+    await secondUnit.click();
+    await expect(secondUnit).toHaveAttribute("aria-current", "true");
+    const sourceComparison = page.getByTestId("manuscript-source-comparison");
+    const originalSecond = await sourceComparison.textContent();
+    expect(originalSecond).toContain("Original second");
+
+    const editor = page.getByTestId("manuscript-editor");
+    const firstEdit = `${await editor.inputValue()}\nBrowser autosave edit`;
+    await editor.fill(firstEdit);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saving");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await expect(sourceComparison).toHaveText(originalSecond ?? "");
+
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByTestId("checkpoint-result")).toHaveText("Checkpoint created");
+    const versionSummary = manuscriptPanel.locator(".editor-heading p.muted");
+    await expect(versionSummary).toContainText("Current version 2");
+    const checkpointVersion = await versionSummary.textContent();
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByTestId("checkpoint-result")).toHaveText(/Checkpoint reused/);
+    await expect(versionSummary).toHaveText(checkpointVersion ?? "");
+
+    failNextSave = true;
+    const retryText = `${firstEdit}\nRetry this save`;
+    await editor.fill(retryText);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saving");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Save failed", { timeout: 5_000 });
+    await expect(editor).toHaveValue(retryText);
+    await manuscriptPanel.getByRole("button", { name: "Retry save" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+
+    await page.goto("about:blank");
+    await stopServer(server.child);
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await expect(page.getByRole("heading", { name: "Browser manuscript story" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Working manuscript" })).toBeVisible();
+    const reopenedPanel = page.locator("section.manuscript-panel");
+    const reopenedUnit = reopenedPanel.getByRole("button", { name: /Arrival/ });
+    await expect(reopenedUnit).toHaveAttribute("aria-current", "true");
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(retryText);
+    await expect(page.getByTestId("manuscript-source-comparison")).toHaveText(originalSecond ?? "");
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved");
+  } finally {
+    if (server) await stopServer(server.child);
+    await page.unroute("**/api/projects/*/manuscript/units/*/draft");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovers a stale draft conflict without losing local prose", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-conflict-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  const uiExpectedRevisions: number[] = [];
+  try {
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Browser conflict story");
+    await page.getByLabel("Import and mend").check();
+    const projectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    const projectId = (await (await projectResponsePromise).json()).id as string;
+
+    await page.getByLabel("Paste source text").fill("# Conflict chapter\nOriginal prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+    await expect(manuscriptPanel.locator(".editor-heading p.muted")).toContainText("draft revision 1");
+
+    const loaded = await page.request.get(`${server.baseUrl}/api/projects/${projectId}/manuscript`);
+    expect(loaded.ok()).toBeTruthy();
+    const unitId = ((await loaded.json()).units[0].unit.id) as string;
+    const otherSave = await page.request.put(`${server.baseUrl}/api/projects/${projectId}/manuscript/units/${unitId}/draft`, {
+      data: { prose: "Other client revision", expectedRevision: 1 }
+    });
+    expect(otherSave.ok()).toBeTruthy();
+    expect((await otherSave.json()).draft.revision).toBe(2);
+
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() !== "PUT" || !/\/manuscript\/units\/[^/]+\/draft$/.test(pathname)) return;
+      const body = request.postDataJSON() as { expectedRevision?: number };
+      if (typeof body.expectedRevision === "number") uiExpectedRevisions.push(body.expectedRevision);
+    });
+
+    const localText = "Local prose that must remain visible";
+    const editor = page.getByTestId("manuscript-editor");
+    await editor.fill(localText);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saving");
+    await expect(page.getByTestId("manuscript-conflict")).toContainText("revision 2", { timeout: 5_000 });
+    await expect(editor).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Save failed");
+    await expect(manuscriptPanel.getByRole("button", { name: "Save local version" })).toBeVisible();
+
+    const latestLocalText = `${localText} updated while the conflict is unresolved`;
+    await editor.fill(latestLocalText);
+    await expect(editor).toHaveValue(latestLocalText);
+    await manuscriptPanel.getByRole("button", { name: "Create checkpoint" }).click();
+    await expect(page.getByText("Checkpoint could not be created because the draft save failed. Retry the save first.", { exact: true })).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(uiExpectedRevisions).toEqual([1]);
+    await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await expect(page.getByTestId("manuscript-conflict")).not.toBeVisible();
+    expect(uiExpectedRevisions).toEqual([1, 2]);
+
+    const resolved = await page.request.get(`${server.baseUrl}/api/projects/${projectId}/manuscript`);
+    expect(resolved.ok()).toBeTruthy();
+    expect((await resolved.json()).units[0].draft).toMatchObject({ prose: latestLocalText, revision: 3 });
+
+    await page.goto("about:blank");
+    await stopServer(server.child);
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await expect(page.getByRole("heading", { name: "Browser conflict story" })).toBeVisible();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(latestLocalText);
+    await expect(manuscriptPanel.locator(".editor-heading p.muted")).toContainText("draft revision 3");
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("blocks project navigation while a draft conflict is unresolved", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-conflict-navigation-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  const uiExpectedRevisions: number[] = [];
+  try {
+    server = await startServer(databasePath, port);
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Conflict navigation first");
+    const firstProjectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    const firstProjectId = (await (await firstProjectResponsePromise).json()).id as string;
+    await page.getByLabel("Paste source text").fill("# Conflict navigation chapter\nOriginal prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+
+    await page.getByLabel("Project name").fill("Conflict navigation second");
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation second" })).toBeVisible();
+    const savedProjects = page.locator("section[aria-labelledby='saved-heading']");
+    const firstProject = savedProjects.locator("li").filter({ hasText: "Conflict navigation first" });
+    await firstProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation first" })).toBeVisible();
+    await expect(manuscriptPanel.getByTestId("manuscript-editor")).toBeVisible();
+
+    const loaded = await page.request.get(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript`);
+    expect(loaded.ok()).toBeTruthy();
+    const unitId = ((await loaded.json()).units[0].unit.id) as string;
+    const otherSave = await page.request.put(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript/units/${unitId}/draft`, {
+      data: { prose: "Other client revision", expectedRevision: 1 }
+    });
+    expect(otherSave.ok()).toBeTruthy();
+    expect((await otherSave.json()).draft.revision).toBe(2);
+
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() !== "PUT" || !/\/manuscript\/units\/[^/]+\/draft$/.test(pathname)) return;
+      const body = request.postDataJSON() as { expectedRevision?: number };
+      if (typeof body.expectedRevision === "number") uiExpectedRevisions.push(body.expectedRevision);
+    });
+
+    const localText = "Local prose must remain visible during conflict navigation";
+    const editor = page.getByTestId("manuscript-editor");
+    await editor.fill(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toContainText("revision 2", { timeout: 5_000 });
+    await expect(editor).toHaveValue(localText);
+
+    const secondProject = savedProjects.locator("li").filter({ hasText: "Conflict navigation second" });
+    await secondProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation first" })).toBeVisible();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toBeVisible();
+    expect(uiExpectedRevisions).toEqual([1]);
+
+    await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    expect(uiExpectedRevisions).toEqual([1, 2]);
+    await secondProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Conflict navigation second" })).toBeVisible();
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not create a project until a draft conflict is resolved", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-project-guard-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  let projectPostCount = 0;
+  try {
+    server = await startServer(databasePath, port);
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/projects") projectPostCount += 1;
+    });
+
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Project guard first");
+    const firstProjectResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/projects";
+    });
+    await page.getByRole("button", { name: "Create project" }).click();
+    const firstProjectId = (await (await firstProjectResponsePromise).json()).id as string;
+    await page.getByLabel("Paste source text").fill("# Project guard chapter\nOriginal prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+
+    const loaded = await page.request.get(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript`);
+    expect(loaded.ok()).toBeTruthy();
+    const unitId = ((await loaded.json()).units[0].unit.id) as string;
+    const otherSave = await page.request.put(`${server.baseUrl}/api/projects/${firstProjectId}/manuscript/units/${unitId}/draft`, {
+      data: { prose: "Other client revision", expectedRevision: 1 }
+    });
+    expect(otherSave.ok()).toBeTruthy();
+    expect((await otherSave.json()).draft.revision).toBe(2);
+
+    const localText = "Local prose must survive the blocked project creation";
+    await page.getByTestId("manuscript-editor").fill(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toContainText("revision 2", { timeout: 5_000 });
+    const newProjectName = "Project guard second";
+    await page.getByLabel("Project name").fill(newProjectName);
+    await page.getByLabel("Import and continue").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+
+    await expect(page.getByRole("heading", { name: "Project guard first" })).toBeVisible();
+    await expect(page.getByLabel("Project name")).toHaveValue(newProjectName);
+    await expect(page.getByLabel("Import and continue")).toBeChecked();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-conflict")).toBeVisible();
+    await expect(manuscriptPanel.getByRole("button", { name: "Save local version" })).toBeVisible();
+    expect(projectPostCount).toBe(1);
+
+    await manuscriptPanel.getByRole("button", { name: "Save local version" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await expect(page.getByTestId("manuscript-conflict")).not.toBeVisible();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: newProjectName })).toBeVisible();
+    expect(projectPostCount).toBe(2);
+  } finally {
+    if (server) await stopServer(server.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("blocks project navigation until a failed manuscript save is retried", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "story-creator-navigation-e2e-"));
+  const databasePath = join(directory, "story.sqlite");
+  const port = await findAvailablePort();
+  let server: RunningServer | undefined;
+  let failNextSave = false;
+  try {
+    server = await startServer(databasePath, port);
+    await page.route("**/api/projects/*/manuscript/units/*/draft", async (route) => {
+      if (!failNextSave) {
+        await route.continue();
+        return;
+      }
+      failNextSave = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Simulated navigation save failure" })
+      });
+    });
+
+    await page.goto(server.baseUrl);
+    await page.getByLabel("Project name").fill("Navigation first");
+    await page.getByLabel("Import and mend").check();
+    await page.getByRole("button", { name: "Create project" }).click();
+    await page.getByLabel("Paste source text").fill("# First chapter\nFirst persisted prose");
+    await page.getByRole("button", { name: "Import source" }).click();
+    const manuscriptPanel = page.locator("section.manuscript-panel");
+    await manuscriptPanel.getByRole("button", { name: "Create working manuscript" }).click();
+
+    await page.getByLabel("Project name").fill("Navigation second");
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(page.getByRole("heading", { name: "Navigation second" })).toBeVisible();
+    const savedProjects = page.locator("section[aria-labelledby='saved-heading']");
+    const firstProject = savedProjects.locator("li").filter({ hasText: "Navigation first" });
+    await firstProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Navigation first" })).toBeVisible();
+    await expect(page.getByTestId("manuscript-editor")).toBeVisible();
+
+    const localText = "Unsaved text must stay mounted during failed navigation";
+    const editor = page.getByTestId("manuscript-editor");
+    await editor.fill(localText);
+    failNextSave = true;
+    const secondProject = savedProjects.locator("li").filter({ hasText: "Navigation second" });
+    await secondProject.getByRole("button", { name: "Open" }).click();
+
+    await expect(page.getByRole("heading", { name: "Navigation first" })).toBeVisible();
+    await expect(editor).toHaveValue(localText);
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Save failed");
+    await expect(manuscriptPanel.getByRole("button", { name: "Retry save" })).toBeVisible();
+
+    await manuscriptPanel.getByRole("button", { name: "Retry save" }).click();
+    await expect(page.getByTestId("manuscript-save-state")).toHaveText("Saved", { timeout: 5_000 });
+    await secondProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Navigation second" })).toBeVisible();
+
+    await firstProject.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Navigation first" })).toBeVisible();
+    await expect(page.getByTestId("manuscript-editor")).toHaveValue(localText);
+  } finally {
+    if (server) await stopServer(server.child);
+    await page.unroute("**/api/projects/*/manuscript/units/*/draft");
     rmSync(directory, { recursive: true, force: true });
   }
 });

@@ -3,7 +3,7 @@ import { ZodError } from "zod";
 import { parseCreateProjectInput } from "@story-creator/domain";
 import type { ProjectRepository } from "@story-creator/persistence";
 
-function readableValidationError(error: unknown): string {
+export function readableValidationError(error: unknown): string {
   if (error instanceof ZodError) {
     return error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ");
   }

@@ -1,5 +1,18 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { kernelProbeExecutionPolicy } from "@story-creator/domain";
 import { buildApp } from "../src/index.js";
+import { FakeProvider } from "../src/providers/fake-provider.js";
+import { OpenRouterProvider } from "../src/providers/openrouter-provider.js";
+import { canonicalJson, openDatabase, ProviderRunRepository } from "@story-creator/persistence";
+
+function valueAtCanonicalBytes(target: number): { value: string } {
+  const emptyBytes = Buffer.byteLength(canonicalJson({ value: "" }), "utf8");
+  return { value: "x".repeat(target - emptyBytes) };
+}
 
 describe("server API", () => {
   it("serves health and project create/list/get routes", async () => {
@@ -62,6 +75,440 @@ describe("server API", () => {
       await second.close();
       const { rmSync } = await import("node:fs");
       rmSync(path, { force: true });
+    }
+  });
+
+  it("imports an immutable source and exposes its read-only outline", async () => {
+    const app = await buildApp({ databasePath: ":memory:" });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Source API project", entryMode: "import-mend" }
+      });
+      const projectId = created.json().id as string;
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/sources`,
+        payload: {
+          filename: "api-story.md",
+          mediaType: "text/markdown",
+          encoding: "utf-8",
+          text: "# First\nOpening\n## Scene\nArrival"
+        }
+      });
+      expect(imported.statusCode).toBe(201);
+      expect(imported.json()).toMatchObject({
+        document: {
+          projectId,
+          filename: "api-story.md",
+          mediaType: "text/markdown",
+          normalizedText: "# First\nOpening\n## Scene\nArrival"
+        },
+        segmentation: { algorithmVersion: "source-segmentation-v1" }
+      });
+      const sourceId = imported.json().document.id as string;
+      const listed = await app.inject({ method: "GET", url: `/api/projects/${projectId}/sources` });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toHaveLength(1);
+      const read = await app.inject({ method: "GET", url: `/api/projects/${projectId}/sources/${sourceId}` });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().segments).toHaveLength(2);
+      const update = await app.inject({
+        method: "PUT",
+        url: `/api/projects/${projectId}/sources/${sourceId}`,
+        payload: { text: "Changed" }
+      });
+      expect(update.statusCode).toBe(409);
+      expect(update.json().error).toMatch(/immutable/i);
+
+      const otherProject = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Other source API project", entryMode: "import-mend" }
+      });
+      const otherProjectId = otherProject.json().id as string;
+      const wrongOwner = await app.inject({ method: "GET", url: `/api/projects/${otherProjectId}/sources/${sourceId}` });
+      expect(wrongOwner.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("creates, autosaves, checkpoints, and enforces manuscript ownership", async () => {
+    const app = await buildApp({ databasePath: ":memory:" });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Manuscript API project", entryMode: "import-mend" }
+      });
+      const projectId = created.json().id as string;
+      const otherProjectResponse = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Other manuscript API project", entryMode: "import-mend" }
+      });
+      const otherProjectId = otherProjectResponse.json().id as string;
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/sources`,
+        payload: {
+          filename: "manuscript-api.md",
+          mediaType: "text/markdown",
+          encoding: "utf-8",
+          text: "# First\nOriginal first\n## Second\nOriginal second"
+        }
+      });
+      const source = imported.json();
+      const sourceDocumentId = source.document.id as string;
+      const beforeSource = (await app.inject({ method: "GET", url: `/api/projects/${projectId}/sources/${sourceDocumentId}` })).json();
+
+      const invalidInitialization = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/manuscript`,
+        payload: { sourceDocumentId: "00000000-0000-4000-8000-000000000999" }
+      });
+      expect(invalidInitialization.statusCode).toBe(404);
+      expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/manuscript` })).json()).toBeNull();
+
+      const wrongOwnerInitialization = await app.inject({
+        method: "POST",
+        url: `/api/projects/${otherProjectId}/manuscript`,
+        payload: { sourceDocumentId }
+      });
+      expect(wrongOwnerInitialization.statusCode).toBe(404);
+
+      const initialized = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/manuscript`,
+        payload: { sourceDocumentId }
+      });
+      expect(initialized.statusCode).toBe(201);
+      expect(initialized.json().units).toHaveLength(2);
+      expect(initialized.json().structure).toMatchObject({ revision: 1 });
+      const unitId = initialized.json().units[0].unit.id as string;
+      expect(initialized.json().units[0].sourceComparison.segment.text).toBe("# First\nOriginal first\n");
+
+      const loaded = await app.inject({ method: "GET", url: `/api/projects/${projectId}/manuscript` });
+      expect(loaded.statusCode).toBe(200);
+      expect(loaded.json().units[0].draft.revision).toBe(1);
+      const comparison = await app.inject({ method: "GET", url: `/api/projects/${projectId}/manuscript/units/${unitId}/source` });
+      expect(comparison.statusCode).toBe(200);
+      expect(comparison.json().segment.text).toBe("# First\nOriginal first\n");
+
+      const saved = await app.inject({
+        method: "PUT",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/draft`,
+        payload: { prose: "Edited first", expectedRevision: 1 }
+      });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json()).toMatchObject({ changed: true, draft: { prose: "Edited first", revision: 2 } });
+      expect(saved.json().manuscript.structure.revision).toBe(1);
+
+      const noOp = await app.inject({
+        method: "PUT",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/draft`,
+        payload: { prose: "Edited first", expectedRevision: 2 }
+      });
+      expect(noOp.statusCode).toBe(200);
+      expect(noOp.json()).toMatchObject({ changed: false, draft: { revision: 2 } });
+
+      const stale = await app.inject({
+        method: "PUT",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/draft`,
+        payload: { prose: "Stale first", expectedRevision: 1 }
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: "DRAFT_REVISION_CONFLICT", currentDraft: { revision: 2, prose: "Edited first" } });
+
+      const checkpoint = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/checkpoint`
+      });
+      expect(checkpoint.statusCode).toBe(201);
+      expect(checkpoint.json()).toMatchObject({ created: true, version: { versionNumber: 2, prose: "Edited first" } });
+      expect(checkpoint.json().manuscript.units[0].unit.acceptedVersionId).toBeNull();
+      const repeatedCheckpoint = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/checkpoint`
+      });
+      expect(repeatedCheckpoint.statusCode).toBe(201);
+      expect(repeatedCheckpoint.json().created).toBe(false);
+      expect(repeatedCheckpoint.json().version.id).toBe(checkpoint.json().version.id);
+
+      const afterSource = (await app.inject({ method: "GET", url: `/api/projects/${projectId}/sources/${sourceDocumentId}` })).json();
+      expect(afterSource).toEqual(beforeSource);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reopens the persisted manuscript and draft after a server restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "story-creator-manuscript-server-"));
+    const databasePath = join(directory, "story.sqlite");
+    const first = await buildApp({ databasePath });
+    let projectId = "";
+    let unitId = "";
+    try {
+      const project = await first.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Restart manuscript", entryMode: "import-mend" }
+      });
+      projectId = project.json().id as string;
+      const source = await first.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/sources`,
+        payload: {
+          filename: "restart.md",
+          mediaType: "text/markdown",
+          encoding: "utf-8",
+          text: "# Restart chapter\nPersist this draft"
+        }
+      });
+      const manuscript = await first.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/manuscript`,
+        payload: { sourceDocumentId: source.json().document.id }
+      });
+      unitId = manuscript.json().units[0].unit.id as string;
+      await first.inject({
+        method: "PUT",
+        url: `/api/projects/${projectId}/manuscript/units/${unitId}/draft`,
+        payload: { prose: "Persisted after restart", expectedRevision: 1 }
+      });
+    } finally {
+      await first.close();
+    }
+
+    const second = await buildApp({ databasePath });
+    try {
+      const reopened = await second.inject({ method: "GET", url: `/api/projects/${projectId}/manuscript` });
+      expect(reopened.statusCode).toBe(200);
+      expect(reopened.json().units[0]).toMatchObject({
+        unit: { id: unitId },
+        draft: { prose: "Persisted after restart", revision: 2 }
+      });
+      expect(reopened.json().units[0].sourceComparison.segment.text).toBe("# Restart chapter\nPersist this draft");
+    } finally {
+      await second.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a pending provider run and executes it only through an explicit action", async () => {
+    const app = await buildApp({ databasePath: ":memory:" });
+    try {
+      const projectResponse = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Provider API project", entryMode: "premise" }
+      });
+      const projectId = projectResponse.json().id as string;
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { title: "Explicit provider run" }
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json()).toMatchObject({ run: { status: "pending" }, candidate: null });
+      const runId = created.json().run.id as string;
+
+      const beforeExecution = await app.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(beforeExecution.json()).toMatchObject({ run: { status: "pending" }, candidate: null });
+
+      const executed = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(executed.statusCode).toBe(200);
+      expect(executed.json()).toMatchObject({
+        run: { status: "completed", provider: "fake", model: "fake-v1" },
+        candidate: { output: { schemaVersion: 1, echo: { title: "Explicit provider run" } } }
+      });
+
+      const listed = await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toHaveLength(1);
+      expect(JSON.stringify(listed.json())).not.toMatch(/OPENROUTER_API_KEY|sk-or-v1-/i);
+
+      const repeatedExecution = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(repeatedExecution.statusCode).toBe(409);
+      expect(repeatedExecution.json().code).toBe("PROVIDER_RUN_STATE_CONFLICT");
+
+      const credentialInput = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { apiKey: "sk-or-v1-do-not-store-this-key" }
+        }
+      });
+      expect(credentialInput.statusCode).toBe(400);
+      expect(credentialInput.json().error).toMatch(/credentials/i);
+      expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` })).json()).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects oversized provider input before creating a row or calling a provider", async () => {
+    const fake = new FakeProvider();
+    const app = await buildApp({ databasePath: ":memory:", providers: [fake] });
+    try {
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Bounded API project", entryMode: "premise" }
+      });
+      const projectId = project.json().id as string;
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: valueAtCanonicalBytes(kernelProbeExecutionPolicy.maxCanonicalInputBytes + 1)
+        }
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json()).toMatchObject({ code: "PROVIDER_INPUT_TOO_LARGE" });
+      expect(rejected.json().error).toMatch(/UTF-8 bytes|limit/i);
+      expect(fake.calls).toHaveLength(0);
+      expect((await app.inject({ method: "GET", url: `/api/projects/${projectId}/provider-runs` })).json()).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("redacts an exact configured OpenRouter secret from API JSON and enabled logs", async () => {
+    const apiKey = "local-development-secret-123";
+    let logs = "";
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs += chunk.toString();
+        callback();
+      }
+    });
+    const openRouter = new OpenRouterProvider({
+      apiKey,
+      fetch: async () => new Response(JSON.stringify({
+        error: { message: `Upstream echoed ${apiKey} without a credential prefix` }
+      }), {
+        status: 502,
+        headers: { "content-type": "application/json" }
+      })
+    });
+    const app = await buildApp({ databasePath: ":memory:", providers: [openRouter], logger: { stream } });
+    try {
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Exact secret API project", entryMode: "premise" }
+      });
+      const projectId = project.json().id as string;
+      const created = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "openrouter",
+          model: "offline/stub",
+          scope: { type: "project" },
+          input: { title: "Redaction test" }
+        }
+      });
+      const runId = created.json().run.id as string;
+      const executed = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs/${runId}/execute`
+      });
+      expect(executed.statusCode).toBe(200);
+      expect(executed.json().run.error.message).toContain("[REDACTED]");
+      expect(executed.body).not.toContain(apiKey);
+
+      const persisted = await app.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(persisted.body).not.toContain(apiKey);
+      app.log.info({ providerRun: executed.json() }, "provider run result");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(logs).not.toContain(apiKey);
+      expect(logs).toContain("[REDACTED]");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("recovers a persisted running provider run when a new server starts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "story-creator-provider-server-"));
+    const databasePath = join(directory, "story.sqlite");
+    let projectId = "";
+    let runId = "";
+    const first = await buildApp({ databasePath });
+    try {
+      const project = await first.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Interrupted provider API", entryMode: "premise" }
+      });
+      projectId = project.json().id as string;
+      const run = await first.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/provider-runs`,
+        payload: {
+          kind: "kernel-probe",
+          provider: "fake",
+          model: "fake-v1",
+          scope: { type: "project" },
+          input: { interrupted: true }
+        }
+      });
+      runId = run.json().run.id as string;
+    } finally {
+      await first.close();
+    }
+
+    const directDatabase = openDatabase(databasePath);
+    new ProviderRunRepository(directDatabase).markRunning(projectId, runId);
+    directDatabase.close();
+
+    const restarted = await buildApp({ databasePath });
+    try {
+      const recovered = await restarted.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/provider-runs/${runId}`
+      });
+      expect(recovered.statusCode).toBe(200);
+      expect(recovered.json()).toMatchObject({
+        run: {
+          status: "failed",
+          error: { code: "PROVIDER_INTERRUPTED", retryable: true }
+        },
+        candidate: null
+      });
+    } finally {
+      await restarted.close();
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });

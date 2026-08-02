@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import type { CreateProjectInput, ProjectEntryMode, ProjectRecord } from "@story-creator/domain";
-import { request, selectedProjectStorageKey } from "./api.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
+import type { CreateProjectInput, ProjectEntryMode, ProjectRecord, SourceInspection, SourceMediaType } from "@story-creator/domain";
+import { request, selectedProjectStorageKey, selectedSourceSegmentStorageKey } from "./api.js";
 import { projectModeLabel, projectModes } from "./project-modes.js";
+import { ManuscriptPanel } from "./manuscript-panel.js";
+import { SourcePanel } from "./source-panel.js";
+import { readSourceFile } from "./source-file.js";
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -12,9 +15,20 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sources, setSources] = useState<SourceInspection[]>([]);
+  const [sourceText, setSourceText] = useState("");
+  const [sourceFilename, setSourceFilename] = useState("pasted.txt");
+  const [sourceMediaType, setSourceMediaType] = useState<SourceMediaType>("text/plain");
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceSaving, setSourceSaving] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceFileBlocked, setSourceFileBlocked] = useState(false);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const manuscriptFlushRef = useRef<() => Promise<boolean>>(async () => true);
 
   const selectedId = selectedProject?.id;
   const selectedSummary = useMemo(() => selectedProject && projectModeLabel(selectedProject.entryMode), [selectedProject]);
+  const selectedSource = sources[0] ?? null;
 
   const loadProjects = async () => {
     setLoading(true);
@@ -42,9 +56,60 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const selectProject = (project: ProjectRecord) => {
+  useEffect(() => {
+    if (!selectedId) {
+      setSources([]);
+      setSelectedSegmentId(null);
+      return;
+    }
+
+    let active = true;
+    setSourceLoading(true);
+    setSourceError(null);
+    void request<SourceInspection[]>(`/api/projects/${selectedId}/sources`)
+      .then((loaded) => {
+        if (!active) return;
+        setSources(loaded);
+        const source = loaded[0];
+        const storedSegmentId = window.localStorage.getItem(selectedSourceSegmentStorageKey(selectedId));
+        const storedSegment = source?.segments.find((segment) => segment.id === storedSegmentId);
+        setSelectedSegmentId(storedSegment?.id ?? source?.segments[0]?.id ?? null);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setSourceError(loadError instanceof Error ? loadError.message : "Could not load source documents");
+      })
+      .finally(() => {
+        if (active) setSourceLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedId]);
+
+  const registerManuscriptNavigationGuard = useCallback((flush: () => Promise<boolean>) => {
+    manuscriptFlushRef.current = flush;
+    return () => {
+      if (manuscriptFlushRef.current === flush) manuscriptFlushRef.current = async () => true;
+    };
+  }, []);
+
+  const flushCurrentManuscript = async (): Promise<boolean> => {
+    try {
+      return await manuscriptFlushRef.current();
+    } catch (navigationError) {
+      setError(navigationError instanceof Error ? navigationError.message : "Could not save the current manuscript before navigation");
+      return false;
+    }
+  };
+
+  const selectProject = async (project: ProjectRecord): Promise<boolean> => {
+    if (project.id === selectedId) return true;
+    if (!(await flushCurrentManuscript())) return false;
     setSelectedProject(project);
     window.localStorage.setItem(selectedProjectStorageKey, project.id);
+    return true;
   };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
@@ -52,18 +117,89 @@ export default function App() {
     setSaving(true);
     setError(null);
     try {
+      if (!(await flushCurrentManuscript())) return;
       const input: CreateProjectInput = { name, entryMode };
       const created = await request<ProjectRecord>("/api/projects", {
         method: "POST",
         body: JSON.stringify(input)
       });
-      setName("");
       setProjects((current) => [created, ...current]);
-      selectProject(created);
+      setSelectedProject(created);
+      window.localStorage.setItem(selectedProjectStorageKey, created.id);
+      setName("");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not create project");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSourceFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    setSourceFileBlocked(true);
+    try {
+      const decoded = await readSourceFile(file);
+      setSourceText(decoded.text);
+      setSourceFilename(decoded.filename);
+      setSourceMediaType(decoded.mediaType);
+      setSourceFileBlocked(false);
+      setSourceError(null);
+    } catch (fileError) {
+      setSourceText("");
+      setSourceFilename("pasted.txt");
+      setSourceMediaType("text/plain");
+      setSourceFileBlocked(true);
+      input.value = "";
+      setSourceError(fileError instanceof Error ? fileError.message : "Could not read source file");
+    }
+  };
+
+  const handleSourceTextChange = (text: string) => {
+    setSourceText(text);
+    if (sourceFileBlocked) {
+      setSourceFileBlocked(false);
+      setSourceError(null);
+    }
+  };
+
+  const importSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedId || sourceFileBlocked) return;
+    setSourceSaving(true);
+    setSourceError(null);
+    try {
+      const created = await request<SourceInspection>(`/api/projects/${selectedId}/sources`, {
+        method: "POST",
+        body: JSON.stringify({
+          filename: sourceFilename.trim() || "pasted.txt",
+          mediaType: sourceMediaType,
+          encoding: "utf-8",
+          text: sourceText
+        })
+      });
+      setSources((current) => [created, ...current.filter((source) => source.document.id !== created.document.id)]);
+      const firstSegmentId = created.segments[0]?.id ?? null;
+      setSelectedSegmentId(firstSegmentId);
+      if (firstSegmentId) {
+        window.localStorage.setItem(selectedSourceSegmentStorageKey(selectedId), firstSegmentId);
+      }
+      setSourceText("");
+      setSourceFilename("pasted.txt");
+      setSourceMediaType("text/plain");
+      event.currentTarget.reset();
+    } catch (saveError) {
+      setSourceError(saveError instanceof Error ? saveError.message : "Could not import source");
+    } finally {
+      setSourceSaving(false);
+    }
+  };
+
+  const selectSourceSegment = (segmentId: string) => {
+    setSelectedSegmentId(segmentId);
+    if (selectedId) {
+      window.localStorage.setItem(selectedSourceSegmentStorageKey(selectedId), segmentId);
     }
   };
 
@@ -130,7 +266,7 @@ export default function App() {
                     <strong>{project.name}</strong>
                     <small>{projectModeLabel(project.entryMode)}</small>
                   </div>
-                  <button className="secondary" type="button" onClick={() => selectProject(project)}>Open</button>
+                  <button className="secondary" type="button" onClick={() => void selectProject(project)}>Open</button>
                 </li>
               ))}
             </ul>
@@ -154,6 +290,28 @@ export default function App() {
           </div>
         ) : <p className="muted">Choose Open on a saved project to view it here.</p>}
       </section>
+
+      <SourcePanel
+        project={selectedProject}
+        source={selectedSource}
+        sourceText={sourceText}
+        filename={sourceFilename}
+        sourceError={sourceError}
+        sourceLoading={sourceLoading}
+        sourceSaving={sourceSaving}
+        selectedSegmentId={selectedSegmentId}
+        onFileChange={(event) => void handleSourceFileChange(event)}
+        onTextChange={handleSourceTextChange}
+        onImport={(event) => void importSource(event)}
+        onSelectSegment={selectSourceSegment}
+      />
+
+      <ManuscriptPanel
+        key={selectedProject?.id ?? "no-project"}
+        project={selectedProject}
+        source={selectedSource}
+        onRegisterNavigationGuard={registerManuscriptNavigationGuard}
+      />
     </main>
   );
 }
